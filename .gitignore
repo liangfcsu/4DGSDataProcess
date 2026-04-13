@@ -1,0 +1,29 @@
+*.pyc
+.vscode
+output
+build
+diff_rasterization/diff_rast.egg-info
+diff_rasterization/dist
+tensorboard_3d
+screenshots
+
+# 数据文件和大型文件
+data/
+*.ply
+*.pth
+*.pt
+*.bin
+*.npy
+*.npz
+
+# 编译产物
+*.so
+*.o
+*.egg-info/
+dist/
+__pycache__/
+
+# submodules 编译产物
+submodules/*/build/
+submodules/*/*.egg-info/
+submodules/*/dist/

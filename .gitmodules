@@ -1,0 +1,9 @@
+[submodule "scripts/self_process_scripts_superglue/1.0BackgroundMattingV2"]
+	path = scripts/self_process_scripts_superglue/1.0BackgroundMattingV2
+	url = https://github.com/PeterL1n/BackgroundMattingV2.git
+[submodule "scripts/self_process_scripts_superglue/Hierarchical-Localization"]
+	path = scripts/self_process_scripts_superglue/Hierarchical-Localization
+	url = https://github.com/cvg/Hierarchical-Localization.git
+[submodule "scripts/self_process_scripts_superglue_noncalib/Hierarchical-Localization"]
+	path = scripts/self_process_scripts_superglue_noncalib/Hierarchical-Localization
+	url = https://github.com/cvg/Hierarchical-Localization.git
