@@ -68,8 +68,8 @@ class PathConfig:
     # ========================================
     # 📁 用户配置路径（只需要修改这里）
     # ========================================
-    ORIGIN_IMAGES = '../../huaban/59'               # 原始图像目录（100台相机）
-    OUTPUT_BASE_DIR = '../../huaban/supergule'  # 输出根目录
+    ORIGIN_IMAGES = '../../data/huaban/59'               # 原始图像目录（100台相机）
+    OUTPUT_BASE_DIR = '../../data/huaban/superglue'  # 输出根目录
     
     # ========================================
     # 🎯 阶段1: COLMAP SfM自动标定路径（自动生成）
