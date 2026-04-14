@@ -42,8 +42,15 @@ def extract_params(camera, calib_text, camera_index):
         width = int(camera['width'])
         height = int(camera['height'])
         
-        # 假设无畸变（COLMAP SfM通常会校正畸变）
-        dist = [0.0, 0.0, 0.0, 0.0, 0.0]
+        # 读取畸变参数（由 convert_colmap_to_calib.py 写入，格式 [k1, k2, p1, p2]）
+        raw_dist = camera.get('distortion', [0.0, 0.0, 0.0, 0.0])
+        # OpenCV 畸变系数顺序: [k1, k2, p1, p2, k3]
+        k1 = float(raw_dist[0]) if len(raw_dist) > 0 else 0.0
+        k2 = float(raw_dist[1]) if len(raw_dist) > 1 else 0.0
+        p1 = float(raw_dist[2]) if len(raw_dist) > 2 else 0.0
+        p2 = float(raw_dist[3]) if len(raw_dist) > 3 else 0.0
+        k3 = float(raw_dist[4]) if len(raw_dist) > 4 else 0.0
+        dist = [k1, k2, p1, p2, k3]
         K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
         
         # 获取位姿（如果有的话）

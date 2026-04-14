@@ -119,10 +119,10 @@ def extract_frames_from_video(video_path, output_dir, cam_num, fps=None, max_fra
 def main():
     parser = argparse.ArgumentParser(description="从100台相机视频中批量提取帧")
     parser.add_argument('--video-dir', type=str, 
-                       default='publicdata/coffee_martini_files/coffee_martini',
+                       default='data/publicdata/coffee_martini_files/coffee_martini_video_origin',
                        help='视频文件目录')
     parser.add_argument('--output-dir', type=str,
-                       default='publicdata/coffee_martini_files/coffee_martini_images',
+                       default='data/publicdata/coffee_martini_files/coffee_martini_images',
                        help='输出根目录')
     parser.add_argument('--fps', type=float, default=None,
                        help='提取帧率（留空表示提取所有帧）')

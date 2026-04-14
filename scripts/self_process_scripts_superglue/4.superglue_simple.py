@@ -31,9 +31,9 @@ from hloc import extract_features, match_features, triangulation
 # ===============================
 
 # 📁 路径配置
-INPUT_IMAGES_DIR = "data1.15/process/selfdataprocess/origin_images/lf/undistortimages"      # 输入图像文件夹路径
-INPUT_SPARSE_DIR = "data1.15/process/selfdataprocess/origin_images/lf/sparse/0"    # 输入稀疏重建文件夹路径 (可选，设为None则不使用)
-OUTPUT_DIR = "data1.15/process/selfdataprocess/origin_images/lf/superglue_output"          # 输出文件夹路径
+INPUT_IMAGES_DIR = "data/douyinvideohuaban/30fps"      # 输入图像文件夹路径
+INPUT_SPARSE_DIR = "data/sparse/0"    # 输入稀疏重建文件夹路径 (可选，设为None则不使用)
+OUTPUT_DIR = "data/douyinvideohuaban/superglue_output"          # 输出文件夹路径
 
 # 🔍 SuperPoint特征提取参数
 SUPERPOINT_MAX_KEYPOINTS = 4096          # 最大关键点数 (256-4096)
@@ -84,6 +84,26 @@ def validate_configuration():
         print(f"❌ SuperGluePretrainedNetwork不可用: {e}")
         return False
 
+
+def parse_colmap_image_names(images_txt_path: Path):
+    """从COLMAP images.txt中解析图像名列表。"""
+    names = []
+    expect_image_line = True
+    with open(images_txt_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            if expect_image_line:
+                parts = line.split()
+                if len(parts) >= 10:
+                    names.append(parts[9])
+                expect_image_line = False
+            else:
+                # images.txt中每张图像有两行：元数据行 + 2D点行
+                expect_image_line = True
+    return names
+
 def main():
     """主函数"""
     # 检查是否提供了命令行参数（除了脚本名以外的参数）
@@ -95,13 +115,13 @@ def main():
         # 使用命令行参数
         parser = argparse.ArgumentParser(description='SuperGlue点云生成器 - 支持命令行参数')
         parser.add_argument('--images-dir', type=str, 
-                           default="3dgs_dataprocess_usecalib/12.19test/test4dgs/images",
+                           default="data/douyinvideohuaban/firstimages",
                            help='输入图像文件夹路径')
         parser.add_argument('--sparse-dir', type=str, 
-                           default="3dgs_dataprocess_usecalib/12.19test/test4dgs/sparse/0",
+                   default="data/sparse/0",
                            help='输入稀疏重建文件夹路径 (可选)')
         parser.add_argument('--output-dir', type=str, 
-                           default="3dgs_dataprocess_usecalib/12.19test/test4dgs/superglue_output",
+                           default="data/douyinvideohuaban/superglue_output",
                            help='输出文件夹路径')
         parser.add_argument('--max-keypoints', type=int, default=4096,
                            help='SuperPoint最大关键点数 (256-4096)')
@@ -192,6 +212,10 @@ def main():
     # 创建输出目录
     output_dir.mkdir(parents=True, exist_ok=True)
     work_dir = output_dir / "temp"
+    # 使用参考稀疏模型时，清理旧缓存以避免图像名/相机模型与历史结果冲突
+    if sparse_dir and sparse_dir.exists() and work_dir.exists():
+        print("♻️  使用参考稀疏模型，清理旧的temp缓存后重建")
+        shutil.rmtree(work_dir)
     work_dir.mkdir(exist_ok=True)
 
     print(f"📂 图像目录: {images_dir}")
@@ -202,7 +226,42 @@ def main():
         print(f"❌ 图像目录不存在: {images_dir}")
         return
 
-    image_list = list(images_dir.glob("*.png")) + list(images_dir.glob("*.jpg"))
+    # 如果指定了参考稀疏模型，必须存在，避免静默回退到从零重建导致相机模型变化
+    if sparse_dir_str and sparse_dir is not None and not sparse_dir.exists():
+        print(f"❌ 参考稀疏重建目录不存在: {sparse_dir}")
+        print("💡 请检查 --sparse-dir 路径，或显式传空值以从零重建")
+        return
+
+    working_images_dir = images_dir
+
+    # 参考稀疏模型与输入图像命名不一致时，创建临时重命名目录以对齐COLMAP图像名
+    if sparse_dir and sparse_dir.exists():
+        images_txt = sparse_dir / "images.txt"
+        if not images_txt.exists():
+            print(f"❌ 参考稀疏模型缺少images.txt: {images_txt}")
+            return
+
+        src_images = sorted(list(images_dir.glob("*.png")) + list(images_dir.glob("*.jpg")))
+        ref_names = sorted(parse_colmap_image_names(images_txt))
+
+        src_name_set = {p.name for p in src_images}
+        ref_name_set = set(ref_names)
+
+        if src_name_set != ref_name_set:
+            if len(src_images) != len(ref_names):
+                print("❌ 输入图像数量与参考稀疏模型图像数量不一致，无法自动对齐")
+                print(f"   输入图像数: {len(src_images)}, 参考图像数: {len(ref_names)}")
+                return
+
+            aligned_images_dir = work_dir / "aligned_images"
+            aligned_images_dir.mkdir(exist_ok=True)
+            print("🔁 检测到图像命名不一致，正在按排序规则创建对齐图像目录...")
+            for src_img, ref_name in zip(src_images, ref_names):
+                shutil.copy2(src_img, aligned_images_dir / ref_name)
+            working_images_dir = aligned_images_dir
+            print(f"✅ 已生成命名对齐目录: {working_images_dir}")
+
+    image_list = list(working_images_dir.glob("*.png")) + list(working_images_dir.glob("*.jpg"))
     print(f"🖼️  找到 {len(image_list)} 张图像")
 
     if len(image_list) < 2:
@@ -231,7 +290,7 @@ def main():
                 }
             }
 
-            extract_features.main(feature_conf, images_dir, feature_path=features_path)
+            extract_features.main(feature_conf, working_images_dir, feature_path=features_path)
             print(f"✅ 特征提取完成 (耗时: {time.time() - step_start:.1f}s)")
         except Exception as e:
             print(f"❌ 特征提取失败: {e}")
@@ -296,17 +355,24 @@ def main():
             result_exists = True
             break
 
+    # 使用参考稀疏模型时，避免复用旧缓存导致相机模型不一致（例如旧结果是SIMPLE_RADIAL）
+    if sparse_dir and sparse_dir.exists() and result_exists:
+        print("♻️  检测到旧的重建缓存，已清理并按参考稀疏模型重新三角化")
+        shutil.rmtree(sfm_dir)
+        sfm_dir.mkdir(exist_ok=True)
+        result_exists = False
+
     if result_exists:
         print("⏭️  重建结果已存在，跳过三角测量")
     else:
         try:
             # 使用现有稀疏重建作为参考（如果存在）
             if sparse_dir and sparse_dir.exists():
-                triangulation.main(sfm_dir, sparse_dir, images_dir, pairs_path, features_path, matches_path)
+                triangulation.main(sfm_dir, sparse_dir, working_images_dir, pairs_path, features_path, matches_path)
             else:
                 # 从零开始重建
                 from hloc.reconstruction import main as reconstruction_main
-                reconstruction_main(sfm_dir, images_dir, pairs_path, features_path, matches_path)
+                reconstruction_main(sfm_dir, working_images_dir, pairs_path, features_path, matches_path)
 
             print(f"✅ 重建完成 (耗时: {time.time() - step_start:.1f}s)")
         except Exception as e:

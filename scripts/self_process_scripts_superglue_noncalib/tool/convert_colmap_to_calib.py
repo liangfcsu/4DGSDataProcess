@@ -226,6 +226,7 @@ def convert_colmap_to_calib(colmap_dir, output_file):
             'fy': camera['fy'],
             'cx': camera['cx'],
             'cy': camera['cy'],
+            'distortion': camera['distortion'],  # k1, k2, p1, p2
             'position': image_info['position'],
             'rotation': image_info['rotation']
         }
