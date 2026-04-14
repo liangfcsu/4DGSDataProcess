@@ -69,6 +69,7 @@ def load_camera_params_from_json(json_file):
         camera_params[cam_id] = {
             'cam_id': cam_id,
             'output_id': int(cam.get('id', cam_id)),
+            'output_img_name': cam.get('img_name', f'cam{cam_id:03d}frame001.png'),
             'K': K,
             'dist_coeffs': dist_coeffs,
             'width': int(cam['width']),
@@ -214,7 +215,7 @@ def main():
         output_id = params['output_id']
         undistorted_cameras.append({
             'id': output_id,
-            'img_name': f'{output_id + 1:03d}.png',
+            'img_name': params['output_img_name'],
             'width': params['final_width'],
             'height': params['final_height'],
             'fx': params['fx'],

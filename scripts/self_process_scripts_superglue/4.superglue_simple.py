@@ -15,6 +15,7 @@ import os
 import time
 from tqdm import tqdm
 import argparse
+import re
 
 # 添加hloc路径
 hloc_path = Path(__file__).parent / "Hierarchical-Localization"
@@ -31,9 +32,9 @@ from hloc import extract_features, match_features, triangulation
 # ===============================
 
 # 📁 路径配置
-INPUT_IMAGES_DIR = "data/douyinvideohuaban/30fps"      # 输入图像文件夹路径
-INPUT_SPARSE_DIR = "data/sparse/0"    # 输入稀疏重建文件夹路径 (可选，设为None则不使用)
-OUTPUT_DIR = "data/douyinvideohuaban/superglue_output"          # 输出文件夹路径
+INPUT_IMAGES_DIR = "data/publicdata/coffee_martini_files/20frams"      # 输入图像文件夹路径
+INPUT_SPARSE_DIR = "data/publicdata/coffee_martini_files/superglue/3dgs_training_data/sparse"    # 输入稀疏重建文件夹路径 (可选，设为None则不使用)
+OUTPUT_DIR = "data/publicdata/coffee_martini_files/superglue_20frams_output"          # 输出文件夹路径
 
 # 🔍 SuperPoint特征提取参数
 SUPERPOINT_MAX_KEYPOINTS = 4096          # 最大关键点数 (256-4096)
@@ -104,6 +105,61 @@ def parse_colmap_image_names(images_txt_path: Path):
                 expect_image_line = True
     return names
 
+
+def resolve_sparse_model_dir(sparse_dir: Path):
+    """支持传入 sparse 或 sparse/0，统一返回包含images.txt的目录。"""
+    if sparse_dir is None:
+        return None
+    if (sparse_dir / "images.txt").exists():
+        return sparse_dir
+    nested = sparse_dir / "0"
+    if nested.exists() and (nested / "images.txt").exists():
+        return nested
+    return sparse_dir
+
+
+def extract_cam_id_from_name(name: str):
+    """从文件名提取cam编号，如 cam001frame020.png -> 1。"""
+    m = re.search(r'cam(\d+)', name)
+    if not m:
+        return None
+    return int(m.group(1))
+
+
+def rewrite_colmap_images_txt_names(images_txt_path: Path, name_map: dict):
+    """将COLMAP images.txt中的图像名按映射表回写为真实输入图像名。"""
+    if not images_txt_path.exists() or not name_map:
+        return 0
+
+    lines = images_txt_path.read_text().splitlines()
+    new_lines = []
+    replaced = 0
+    expect_image_line = True
+
+    for line in lines:
+        s = line.strip()
+        if not s or s.startswith('#'):
+            new_lines.append(line)
+            continue
+
+        if expect_image_line:
+            parts = line.split()
+            if len(parts) >= 10:
+                old_name = parts[9]
+                new_name = name_map.get(old_name)
+                if new_name and new_name != old_name:
+                    parts[9] = new_name
+                    line = ' '.join(parts)
+                    replaced += 1
+            expect_image_line = False
+        else:
+            expect_image_line = True
+
+        new_lines.append(line)
+
+    images_txt_path.write_text('\n'.join(new_lines) + '\n')
+    return replaced
+
 def main():
     """主函数"""
     # 检查是否提供了命令行参数（除了脚本名以外的参数）
@@ -115,13 +171,13 @@ def main():
         # 使用命令行参数
         parser = argparse.ArgumentParser(description='SuperGlue点云生成器 - 支持命令行参数')
         parser.add_argument('--images-dir', type=str, 
-                           default="data/douyinvideohuaban/firstimages",
+                           default="data/publicdata/coffee_martini_files/20frams",
                            help='输入图像文件夹路径')
         parser.add_argument('--sparse-dir', type=str, 
-                   default="data/sparse/0",
+                   default="data/publicdata/coffee_martini_files/superglue/3dgs_training_data/sparse",
                            help='输入稀疏重建文件夹路径 (可选)')
         parser.add_argument('--output-dir', type=str, 
-                           default="data/douyinvideohuaban/superglue_output",
+                           default="data/publicdata/coffee_martini_files/superglue_20frams_output",
                            help='输出文件夹路径')
         parser.add_argument('--max-keypoints', type=int, default=4096,
                            help='SuperPoint最大关键点数 (256-4096)')
@@ -207,6 +263,7 @@ def main():
     
     images_dir = resolve_path(images_dir_str)
     sparse_dir = resolve_path(sparse_dir_str) if sparse_dir_str else None
+    sparse_dir = resolve_sparse_model_dir(sparse_dir) if sparse_dir else None
     output_dir = resolve_path(output_dir_str)
 
     # 创建输出目录
@@ -233,6 +290,7 @@ def main():
         return
 
     working_images_dir = images_dir
+    aligned_name_map = {}
 
     # 参考稀疏模型与输入图像命名不一致时，创建临时重命名目录以对齐COLMAP图像名
     if sparse_dir and sparse_dir.exists():
@@ -241,7 +299,11 @@ def main():
             print(f"❌ 参考稀疏模型缺少images.txt: {images_txt}")
             return
 
-        src_images = sorted(list(images_dir.glob("*.png")) + list(images_dir.glob("*.jpg")))
+        src_images = sorted(
+            list(images_dir.glob("*.png")) +
+            list(images_dir.glob("*.jpg")) +
+            list(images_dir.glob("*.jpeg"))
+        )
         ref_names = sorted(parse_colmap_image_names(images_txt))
 
         src_name_set = {p.name for p in src_images}
@@ -255,9 +317,37 @@ def main():
 
             aligned_images_dir = work_dir / "aligned_images"
             aligned_images_dir.mkdir(exist_ok=True)
-            print("🔁 检测到图像命名不一致，正在按排序规则创建对齐图像目录...")
-            for src_img, ref_name in zip(src_images, ref_names):
-                shutil.copy2(src_img, aligned_images_dir / ref_name)
+
+            src_by_cam = {}
+            ref_by_cam = {}
+            for src_img in src_images:
+                cam_id = extract_cam_id_from_name(src_img.name)
+                if cam_id is not None:
+                    src_by_cam[cam_id] = src_img
+            for ref_name in ref_names:
+                cam_id = extract_cam_id_from_name(ref_name)
+                if cam_id is not None:
+                    ref_by_cam[cam_id] = ref_name
+
+            use_cam_match = (
+                len(src_by_cam) == len(src_images) and
+                len(ref_by_cam) == len(ref_names) and
+                set(src_by_cam.keys()) == set(ref_by_cam.keys())
+            )
+
+            if use_cam_match:
+                print("🔁 检测到图像命名不一致，按cam编号对齐图像目录...")
+                for cam_id in sorted(ref_by_cam.keys()):
+                    src_name = src_by_cam[cam_id].name
+                    ref_name = ref_by_cam[cam_id]
+                    shutil.copy2(src_by_cam[cam_id], aligned_images_dir / ref_name)
+                    aligned_name_map[ref_name] = src_name
+            else:
+                print("🔁 检测到图像命名不一致，按排序规则创建对齐图像目录...")
+                for src_img, ref_name in zip(src_images, ref_names):
+                    shutil.copy2(src_img, aligned_images_dir / ref_name)
+                    aligned_name_map[ref_name] = src_img.name
+
             working_images_dir = aligned_images_dir
             print(f"✅ 已生成命名对齐目录: {working_images_dir}")
 
@@ -433,6 +523,12 @@ def main():
     if not points_file.exists():
         print("❌ 未找到points3D.txt")
         return
+
+    # 将导出的COLMAP图像名回写为真实输入图像名（避免输出仍为对齐参考名）
+    images_txt_out = sparse_output / "images.txt"
+    if aligned_name_map and images_txt_out.exists():
+        replaced = rewrite_colmap_images_txt_names(images_txt_out, aligned_name_map)
+        print(f"📝 已将images.txt中的{replaced}个图像名回写为真实输入名")
 
     try:
         points_3d = []

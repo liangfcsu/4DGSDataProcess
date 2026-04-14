@@ -15,6 +15,15 @@ import numpy as np
 from pathlib import Path
 import sys
 import os
+import re
+
+
+def parse_real_cam_id(image_name, fallback_id):
+    """优先从 camXXX... 文件名提取真实相机ID，失败时回退。"""
+    m = re.match(r'^cam(\d+)', image_name)
+    if m:
+        return int(m.group(1))
+    return fallback_id
 
 def parse_colmap_cameras(cameras_file):
     """解析COLMAP cameras.txt文件"""
@@ -217,8 +226,10 @@ def convert_colmap_to_calib(colmap_dir, output_file):
         camera = cameras[camera_id]
         
         # 构建标定数据项（与generate_pointcloud_multicam.py兼容的格式）
+        real_cam_id = parse_real_cam_id(image_info['name'], image_id - 1)
         calib_item = {
-            'id': image_id - 1,  # 从0开始编号
+            'id': real_cam_id,
+            'reconstruction_id': image_id - 1,  # 保留重建序号，便于排查
             'img_name': image_info['name'],
             'width': camera['width'],
             'height': camera['height'],

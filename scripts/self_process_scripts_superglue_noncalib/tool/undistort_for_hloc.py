@@ -29,6 +29,14 @@ def load_calib(path):
     return calib_data, calib_text
 
 
+def parse_real_cam_id(img_name, fallback_id):
+    """从 camXXX... 文件名提取真实相机ID，失败时回退。"""
+    m = re.match(r'^cam(\d+)', img_name)
+    if m:
+        return int(m.group(1))
+    return fallback_id
+
+
 def extract_params(camera, calib_text, camera_index):
     """从camera条目提取内参和畸变参数，兼容COLMAP转换的calibration格式"""
     
@@ -275,8 +283,8 @@ def undistort_for_hloc(calib_path, images_dir, out_dir, alpha=0.0, validation_mo
             final_w, final_h = w, h
             K_final = new_K
         
-        # 保存去畸变图像 - 使用标准化名称格式
-        output_name = f"{i+1:03d}.png"
+        # 保存去畸变图像 - 优先保持真实 camXXX 命名
+        output_name = actual_img_name
         out_file = images_out / output_name
         cv2.imencode('.png', final_img)[1].tofile(str(out_file))
         
@@ -305,8 +313,9 @@ def undistort_for_hloc(calib_path, images_dir, out_dir, alpha=0.0, validation_mo
             else:
                 rot = rotation
         
+        cam_id = parse_real_cam_id(actual_img_name, i)
         camera_entry = {
-            'id': i,
+            'id': cam_id,
             'img_name': output_name,  # 使用输出的标准化名称
             'width': final_w,
             'height': final_h,

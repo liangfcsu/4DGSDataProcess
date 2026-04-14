@@ -13,6 +13,7 @@ from hloc import extract_features, match_features, pairs_from_exhaustive
 from hloc.utils import io
 import shutil
 import time
+import re
 import sys
 import argparse
 
@@ -82,9 +83,14 @@ class MultiCameraPointCloudGenerator:
         self.cameras = {}
         self.images = {}
         
-        for cam in calib_data:
-            cam_id = cam['id'] + 1  # COLMAP相机ID从1开始
-            img_id = cam['id'] + 1  # COLMAP图像ID从1开始
+        for idx, cam in enumerate(calib_data):
+            # 优先使用真实 camXXX 相机编号；COLMAP ID 仍保持从1开始
+            img_name = cam.get('img_name', '')
+            m = re.match(r'^cam(\d+)', img_name)
+            base_cam_id = int(m.group(1)) if m else int(cam['id'])
+            cam_id = base_cam_id + 1
+            # 图像ID使用连续编号，避免相机ID缺号导致ID冲突
+            img_id = idx + 1
             
             # 存储相机信息
             self.cameras[cam_id] = {
