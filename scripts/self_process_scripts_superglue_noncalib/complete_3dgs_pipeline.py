@@ -68,8 +68,8 @@ class PathConfig:
     # ========================================
     # 📁 用户配置路径（只需要修改这里）
     # ========================================
-    ORIGIN_IMAGES = '../../data/publicdata/coffee_martini_files/firstimages'               # 原始图像目录（100台相机）
-    OUTPUT_BASE_DIR = '../../data/publicdata/coffee_martini_files/superglue'  # 输出根目录
+    ORIGIN_IMAGES = '../../data/usdata/firstimages'               # 原始图像目录（100台相机）
+    OUTPUT_BASE_DIR = '../../data/usdata/superglue'  # 输出根目录
     
     # ========================================
     # 🎯 阶段1: COLMAP SfM自动标定路径（自动生成）

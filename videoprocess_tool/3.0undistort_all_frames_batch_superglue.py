@@ -122,9 +122,9 @@ def main():
     base_dir = script_dir.parent
     
     # 路径配置
-    input_dir = base_dir / 'data/publicdata/coffee_martini_files/coffee_martini_images'
-    calib_file = base_dir / 'data/publicdata/coffee_martini_files/superglue/colmap_sfm/estimated_calib.json'
-    output_dir = base_dir / 'data/publicdata/coffee_martini_files/undistorted_all_images'
+    input_dir = base_dir / 'data/usdata/ims'
+    calib_file = base_dir / 'data/usdata/superglue/colmap_sfm/estimated_calib.json'
+    output_dir = base_dir / 'data/usdata/undistorted_all_images'
     
     print(f"📂 输入目录: {input_dir}")
     print(f"📄 标定文件: {calib_file}")

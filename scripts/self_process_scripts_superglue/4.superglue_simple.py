@@ -3,6 +3,9 @@
 生成colmap格式后的点云 使用Hierarchical-Localization中的SuperGlue进行特征匹配和三角测量重建，输入校正后的图像
 SuperGlue点云生成器 - 简单配置版本
 直接修改下面的参数，然后运行脚本即可生成点云
+如果想要在其他帧生成点云 需要把sparse文件夹中的images.txt中的图像名改为对应帧的图像名（例如cam001frame030.png）以对齐输入图像和稀疏重建的图像名，或者直接传入对齐后的图像目录（例如之前生成的aligned_images目录）以自动对齐图像名
+示例：
+python scripts/self_process_scripts_superglue/4.superglue_simple.py
 """
 
 import json
@@ -32,9 +35,9 @@ from hloc import extract_features, match_features, triangulation
 # ===============================
 
 # 📁 路径配置
-INPUT_IMAGES_DIR = "data/publicdata/coffee_martini_files/20frams"      # 输入图像文件夹路径
-INPUT_SPARSE_DIR = "data/publicdata/coffee_martini_files/superglue/3dgs_training_data/sparse"    # 输入稀疏重建文件夹路径 (可选，设为None则不使用)
-OUTPUT_DIR = "data/publicdata/coffee_martini_files/superglue_20frams_output"          # 输出文件夹路径
+INPUT_IMAGES_DIR = "data/douyinvideohuaban/190/190frame"      # 输入图像文件夹路径
+INPUT_SPARSE_DIR = "data/sparse/0"    # 输入稀疏重建文件夹路径 (可选，设为None则不使用)
+OUTPUT_DIR = "data/douyinvideohuaban/190/output"          # 输出文件夹路径
 
 # 🔍 SuperPoint特征提取参数
 SUPERPOINT_MAX_KEYPOINTS = 4096          # 最大关键点数 (256-4096)
