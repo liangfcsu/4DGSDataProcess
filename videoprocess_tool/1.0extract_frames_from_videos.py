@@ -13,8 +13,64 @@ from tqdm import tqdm
 import re
 
 
+def _sample_evenly_in_range(start_frame, end_frame, sample_count):
+    """
+    在 [start_frame, end_frame) 范围内尽量均匀地采样 sample_count 个帧索引
+    """
+    frame_count = end_frame - start_frame
+    if frame_count <= 0 or sample_count <= 0:
+        return []
+
+    if sample_count >= frame_count:
+        return list(range(start_frame, end_frame))
+
+    step = frame_count / sample_count
+    sampled = []
+    for i in range(sample_count):
+        frame_idx = start_frame + int((i + 0.5) * step)
+        frame_idx = min(frame_idx, end_frame - 1)
+
+        if sampled and frame_idx <= sampled[-1]:
+            frame_idx = sampled[-1] + 1
+        frame_idx = min(frame_idx, end_frame - 1)
+
+        sampled.append(frame_idx)
+
+    return sampled
+
+
+def _build_uniform_per_second_targets(start_frame, end_frame, video_fps, frames_per_second):
+    """
+    按“每秒均匀提取 N 帧”构建目标帧索引（升序）
+    """
+    if end_frame <= start_frame or frames_per_second <= 0:
+        return []
+
+    targets = []
+    current_second = int(start_frame / video_fps)
+
+    while True:
+        sec_start = int(current_second * video_fps)
+        sec_end = int((current_second + 1) * video_fps)
+        if sec_start >= end_frame:
+            break
+
+        bucket_start = max(start_frame, sec_start)
+        bucket_end = min(end_frame, sec_end)
+        available = bucket_end - bucket_start
+
+        if available > 0:
+            sample_count = min(frames_per_second, available)
+            targets.extend(_sample_evenly_in_range(bucket_start, bucket_end, sample_count))
+
+        current_second += 1
+
+    return targets
+
+
 def extract_frames_from_video(video_path, output_dir, cam_num, fps=None, max_frames=None,
-                              start_second=None, end_second=None):
+                              start_second=None, end_second=None,
+                              frames_per_second=None):
     """
     从视频中提取帧
     
@@ -26,6 +82,7 @@ def extract_frames_from_video(video_path, output_dir, cam_num, fps=None, max_fra
         max_frames: 最大提取帧数（None表示不限制）
         start_second: 起始秒数（None表示从0秒开始）
         end_second: 结束秒数（None表示到视频结尾）
+        frames_per_second: 每秒均匀提取帧数（None表示不启用）
     """
     # 确保输出目录存在
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -39,6 +96,11 @@ def extract_frames_from_video(video_path, output_dir, cam_num, fps=None, max_fra
     # 获取视频信息
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     video_fps = cap.get(cv2.CAP_PROP_FPS)
+
+    if video_fps <= 0:
+        print(f"❌ 视频FPS无效（{video_fps}）: {video_path}")
+        cap.release()
+        return 0
     
     print(f"📹 相机{cam_num:03d}: {video_path.name}")
     print(f"   视频FPS: {video_fps:.2f}, 总帧数: {total_frames}")
@@ -60,21 +122,36 @@ def extract_frames_from_video(video_path, output_dir, cam_num, fps=None, max_fra
     # 定位到起始帧
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     range_frames = end_frame - start_frame
-    
-    # 计算帧间隔
-    if fps is not None and fps < video_fps:
+
+    # 计算目标提取策略
+    use_uniform_per_second = frames_per_second is not None
+    target_frame_indices = []
+
+    if use_uniform_per_second:
+        target_frame_indices = _build_uniform_per_second_targets(
+            start_frame=start_frame,
+            end_frame=end_frame,
+            video_fps=video_fps,
+            frames_per_second=frames_per_second
+        )
+        print(f"   每秒均匀提取: {frames_per_second} 帧")
+    elif fps is not None and fps < video_fps:
         frame_interval = int(video_fps / fps)
+        frame_interval = max(frame_interval, 1)
         print(f"   提取帧率: {fps} FPS (每隔{frame_interval}帧提取一次)")
     else:
         frame_interval = 1
         print(f"   提取所有帧")
-    
+
     # 提取帧
     frame_count = start_frame
     local_frame_count = 0
     saved_count = 0
 
-    expected_saved = (range_frames + frame_interval - 1) // frame_interval
+    if use_uniform_per_second:
+        expected_saved = len(target_frame_indices)
+    else:
+        expected_saved = (range_frames + frame_interval - 1) // frame_interval
     pbar_total = expected_saved if max_frames is None else min(expected_saved, max_frames)
 
     pbar = tqdm(total=pbar_total,
@@ -86,28 +163,58 @@ def extract_frames_from_video(video_path, output_dir, cam_num, fps=None, max_fra
         end_show = "视频结尾" if end_second is None else end_second
         print(f"   时间范围: {start_show}s - {end_show}s")
 
-    while frame_count < end_frame:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        
-        # 根据帧间隔决定是否保存
-        if local_frame_count % frame_interval == 0:
-            # 生成输出文件名：cam001frame001.png
-            frame_filename = f"cam{cam_num:03d}frame{saved_count+1:03d}.png"
-            output_path = output_dir / frame_filename
-            
-            # 保存帧
-            cv2.imwrite(str(output_path), frame)
-            saved_count += 1
-            pbar.update(1)
-            
-            # 检查是否达到最大帧数
-            if max_frames is not None and saved_count >= max_frames:
+    if use_uniform_per_second:
+        target_pos = 0
+        next_target = target_frame_indices[target_pos] if target_frame_indices else None
+
+        while frame_count < end_frame and next_target is not None:
+            ret, frame = cap.read()
+            if not ret:
                 break
-        
-        frame_count += 1
-        local_frame_count += 1
+
+            if frame_count == next_target:
+                # 生成输出文件名：cam001frame001.png
+                frame_filename = f"cam{cam_num:03d}frame{saved_count+1:03d}.png"
+                output_path = output_dir / frame_filename
+
+                # 保存帧
+                cv2.imwrite(str(output_path), frame)
+                saved_count += 1
+                pbar.update(1)
+
+                # 检查是否达到最大帧数
+                if max_frames is not None and saved_count >= max_frames:
+                    break
+
+                target_pos += 1
+                if target_pos >= len(target_frame_indices):
+                    break
+                next_target = target_frame_indices[target_pos]
+
+            frame_count += 1
+    else:
+        while frame_count < end_frame:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # 根据帧间隔决定是否保存
+            if local_frame_count % frame_interval == 0:
+                # 生成输出文件名：cam001frame001.png
+                frame_filename = f"cam{cam_num:03d}frame{saved_count+1:03d}.png"
+                output_path = output_dir / frame_filename
+
+                # 保存帧
+                cv2.imwrite(str(output_path), frame)
+                saved_count += 1
+                pbar.update(1)
+
+                # 检查是否达到最大帧数
+                if max_frames is not None and saved_count >= max_frames:
+                    break
+
+            frame_count += 1
+            local_frame_count += 1
     
     pbar.close()
     cap.release()
@@ -126,6 +233,8 @@ def main():
                        help='输出根目录')
     parser.add_argument('--fps', type=float, default=None,
                        help='提取帧率（留空表示提取所有帧）')
+    parser.add_argument('--frames-per-second', type=int, default=4,
+                       help='每秒均匀提取帧数（例如 2 表示每秒均匀提取 2 帧）')
     parser.add_argument('--max-frames', type=int, default=None,
                        help='每个视频最大提取帧数（留空表示不限制）')
     parser.add_argument('--start-second', type=float, default=None,
@@ -155,6 +264,18 @@ def main():
         print("❌ --end-second 不能小于0")
         return
 
+    if args.fps is not None and args.fps <= 0:
+        print("❌ --fps 必须大于0")
+        return
+
+    if args.frames_per_second is not None and args.frames_per_second <= 0:
+        print("❌ --frames-per-second 必须大于0")
+        return
+
+    if args.fps is not None and args.frames_per_second is not None:
+        print("❌ --fps 与 --frames-per-second 不能同时设置，请二选一")
+        return
+
     if args.start_second is not None and args.end_second is not None and args.end_second <= args.start_second:
         print("❌ --end-second 必须大于 --start-second")
         return
@@ -170,7 +291,10 @@ def main():
         start_show = "-inf" if args.start_cam is None else f"{args.start_cam:03d}"
         end_show = "inf" if args.end_cam is None else f"{args.end_cam:03d}"
         print(f"相机范围: {start_show} - {end_show}")
-    print(f"提取帧率: {'全部帧' if args.fps is None else f'{args.fps} FPS'}")
+    if args.frames_per_second is not None:
+        print(f"提取模式: 每秒均匀提取 {args.frames_per_second} 帧")
+    else:
+        print(f"提取帧率: {'全部帧' if args.fps is None else f'{args.fps} FPS'}")
     print(f"最大帧数: {'不限制' if args.max_frames is None else args.max_frames}")
     if args.start_second is None and args.end_second is None:
         print("时间范围: 全时段")
@@ -229,7 +353,8 @@ def main():
                 fps=args.fps,
                 max_frames=args.max_frames,
                 start_second=args.start_second,
-                end_second=args.end_second
+                end_second=args.end_second,
+                frames_per_second=args.frames_per_second
             )
             total_frames += saved_count
             processed_videos += 1
