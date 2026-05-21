@@ -27,6 +27,26 @@ sys.path.insert(0, str(hloc_path.absolute()))
 superglue_path = hloc_path / "third_party" / "SuperGluePretrainedNetwork"
 sys.path.insert(0, str(superglue_path.absolute()))
 
+# ⚡ 在导入hloc/PyTorch之前提前解析--gpu参数并设置CUDA_VISIBLE_DEVICES
+# 必须在此处设置，否则PyTorch在import时就已初始化CUDA，之后设置无效
+def _early_set_gpu():
+    _gpu = None
+    for i, arg in enumerate(sys.argv):
+        if arg == '--gpu' and i + 1 < len(sys.argv):
+            try:
+                _gpu = int(sys.argv[i + 1])
+            except ValueError:
+                pass
+            break
+    if _gpu is None:
+        # 读取全局默认值（脚本底部定义的 GPU_INDEX）
+        # 此时还未执行到全局变量定义，先读取环境变量或默认0
+        _gpu = int(os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]) if "CUDA_VISIBLE_DEVICES" in os.environ else 0
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(_gpu)
+    return _gpu
+
+_EARLY_GPU_INDEX = _early_set_gpu()
+
 from hloc import extract_features, match_features, triangulation
 
 # ===============================
@@ -59,16 +79,20 @@ TRIANGULATION_MAX_ERROR = 4.0            # 最大重投影误差（像素）(1.0
 # 🔧 系统参数 (通常不需要修改)
 # ===============================
 GPU_ENABLED = True                       # 是否启用GPU
+GPU_INDEX = 0                            # 使用的GPU编号 (0, 1, 2, ...)
 VERBOSE = True                           # 是否显示详细信息
 
-def check_gpu_availability():
+def check_gpu_availability(gpu_index=0):
     """检查GPU可用性"""
     try:
         import torch
         if torch.cuda.is_available():
             device_count = torch.cuda.device_count()
-            device_name = torch.cuda.get_device_name(0)
-            print(f"🖥️  GPU可用: {device_name} ({device_count} 个设备)")
+            if gpu_index >= device_count:
+                print(f"⚠️  GPU {gpu_index} 不存在，共 {device_count} 个GPU，将使用 GPU 0")
+                gpu_index = 0
+            device_name = torch.cuda.get_device_name(gpu_index)
+            print(f"🖥️  GPU可用: [{gpu_index}] {device_name} (共 {device_count} 个设备)")
             return True
         else:
             print("💻 使用CPU模式")
@@ -312,6 +336,7 @@ def run_multiframe_pipeline(script_path: Path, images_dir: Path, sparse_dir: Pat
             "--sinkhorn-iterations", str(params["sinkhorn_iterations"]),
             "--match-threshold", str(params["match_threshold"]),
             "--points-only",
+            "--gpu", str(params.get("gpu_index", 0)),
         ]
 
         print(f"\n================ frame{frame_id:03d} ================")
@@ -424,6 +449,8 @@ def main():
                            help='三角测量最大重投影误差（像素）(1.0-10.0)')
         parser.add_argument('--points-only', action='store_true',
                            help='仅导出points3D.txt，不额外生成PLY和统计信息')
+        parser.add_argument('--gpu', type=int, default=None,
+                           help='指定使用的GPU编号，例如 --gpu 0 或 --gpu 1，不指定则使用默认GPU')
         
         args = parser.parse_args()
         
@@ -441,6 +468,7 @@ def main():
         sinkhorn_iterations = args.sinkhorn_iterations
         match_threshold = args.match_threshold
         points_only = args.points_only
+        gpu_index = args.gpu if args.gpu is not None else GPU_INDEX
     else:
         # 使用硬编码配置
         images_dir_str = INPUT_IMAGES_DIR
@@ -456,6 +484,7 @@ def main():
         sinkhorn_iterations = SUPERGLUE_SINKHORN_ITERATIONS
         match_threshold = SUPERGLUE_MATCH_THRESHOLD
         points_only = False
+        gpu_index = GPU_INDEX
     
     start_time = time.time()
     print("🚀 SuperGlue点云生成器 (简单配置版)")
@@ -472,12 +501,15 @@ def main():
     print(f"  SuperGlue权重: {superglue_weights}")
     print()
 
+    # GPU已在脚本顶部import前提前设置（_early_set_gpu），此处仅打印确认
+    print(f"🖥️  使用GPU: {gpu_index} (CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'unset')})")
+
     # 系统检查
     print("🔧 系统检查...")
     if not validate_configuration():
         return
 
-    check_gpu_availability()
+    check_gpu_availability(gpu_index=0)  # 设置环境变量后，实际可见的GPU编号为0
 
     # 设置路径 - 智能处理绝对路径和相对路径
     script_dir = Path(__file__).parent
@@ -539,6 +571,7 @@ def main():
             "superglue_weights": superglue_weights,
             "sinkhorn_iterations": sinkhorn_iterations,
             "match_threshold": match_threshold,
+            "gpu_index": gpu_index,
         }
         run_multiframe_pipeline(Path(__file__).resolve(), images_dir, sparse_dir, output_dir,
                                 frame_to_cams, frame_ids, params)
