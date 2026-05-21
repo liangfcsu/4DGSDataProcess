@@ -1,0 +1,6 @@
+python scripts/self_process_scripts_superglue_mutil_sparse/superglue_mutil.py \
+  --images-dir huabantraindata/ims \
+  --sparse-dir huabantraindata/sparse/0 \
+  --output-dir huabantraindata/frame_superglue_output \
+  --start-frame 60 \
+  --end-frame 300
