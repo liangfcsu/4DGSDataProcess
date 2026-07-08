@@ -14,6 +14,8 @@ import numpy as np
 from pathlib import Path
 from PIL import Image
 
+IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'}
+
 
 def detect_pose_format(cameras):
     """Automatically detect the pose format from camera data
@@ -227,13 +229,83 @@ def load_cameras_json(path):
     with open(path, 'r') as f:
         data = json.load(f)
     
-    # Handle both formats: {"cameras": [...]} or directly [...]
+    # Handle formats:
+    #   1. {"cameras": [...]} or directly [...]
+    #   2. calib style: {"Calibration": {"cameras": [...]}}
     if isinstance(data, dict) and 'cameras' in data:
         return data['cameras']
+    elif isinstance(data, dict) and 'Calibration' in data and 'cameras' in data['Calibration']:
+        return [calib_camera_to_flat_camera(cam, i) for i, cam in enumerate(data['Calibration']['cameras'])]
     elif isinstance(data, list):
         return data
     else:
         raise ValueError("Unsupported cameras.json format")
+
+
+def calib_camera_to_flat_camera(cam, index):
+    """Convert calib0.3343.json-style camera entries to the flat format used below."""
+    data = cam['model']['ptr_wrapper']['data']
+    image_size = data['CameraModelCRT']['CameraModelBase']['imageSize']
+    params = data['parameters']
+    transform = cam.get('transform', {})
+    rotation = transform.get('rotation', {'rx': 0.0, 'ry': 0.0, 'rz': 0.0})
+    translation = transform.get('translation', {'x': 0.0, 'y': 0.0, 'z': 0.0})
+
+    f = float(params['f']['val'])
+    ar = float(params.get('ar', {'val': 1.0})['val'])
+    if isinstance(translation, dict):
+        position = [
+            float(translation.get('x', 0.0)),
+            float(translation.get('y', 0.0)),
+            float(translation.get('z', 0.0)),
+        ]
+    else:
+        position = [float(v) for v in translation]
+
+    return {
+        'id': index,
+        'width': int(image_size['width']),
+        'height': int(image_size['height']),
+        'position': position,
+        'rotation': {
+            'rx': float(rotation.get('rx', 0.0)),
+            'ry': float(rotation.get('ry', 0.0)),
+            'rz': float(rotation.get('rz', 0.0)),
+        },
+        'fx': f,
+        'fy': f * ar,
+        'cx': float(params['cx']['val']),
+        'cy': float(params['cy']['val']),
+        'distortion': {
+            'k1': float(params.get('k1', {'val': 0.0})['val']),
+            'k2': float(params.get('k2', {'val': 0.0})['val']),
+            'k3': float(params.get('k3', {'val': 0.0})['val']),
+            'k4': float(params.get('k4', {'val': 0.0})['val']),
+            'k5': float(params.get('k5', {'val': 0.0})['val']),
+            'k6': float(params.get('k6', {'val': 0.0})['val']),
+            'p1': float(params.get('p1', {'val': 0.0})['val']),
+            'p2': float(params.get('p2', {'val': 0.0})['val']),
+        },
+    }
+
+
+def list_image_names(images_dir):
+    images_path = Path(images_dir)
+    if not images_path.exists():
+        return []
+    return sorted([
+        p.name for p in images_path.iterdir()
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+    ])
+
+
+def fill_missing_image_names(cameras, images_dir):
+    image_names = list_image_names(images_dir)
+    if len(image_names) != len(cameras):
+        return
+    for i, cam in enumerate(cameras):
+        if 'img_name' not in cam and 'name' not in cam:
+            cam['img_name'] = image_names[i]
 
 
 def euler_to_quaternion_zyx(rx, ry, rz):
@@ -520,7 +592,67 @@ def convert_to_wtc_transform(position, rotation_euler, method='direct'):
     return qw, qx, qy, qz, t_wtc[0], t_wtc[1], t_wtc[2]
 
 
-def write_cameras_txt(cameras, output_path):
+def get_distortion(cam):
+    raw = cam.get('distortion', {})
+    if isinstance(raw, dict):
+        return {
+            'k1': float(raw.get('k1', 0.0)),
+            'k2': float(raw.get('k2', 0.0)),
+            'k3': float(raw.get('k3', 0.0)),
+            'k4': float(raw.get('k4', 0.0)),
+            'k5': float(raw.get('k5', 0.0)),
+            'k6': float(raw.get('k6', 0.0)),
+            'p1': float(raw.get('p1', 0.0)),
+            'p2': float(raw.get('p2', 0.0)),
+        }
+    if isinstance(raw, list):
+        values = [float(v) for v in raw]
+        values += [0.0] * max(0, 8 - len(values))
+        return {
+            'k1': values[0],
+            'k2': values[1],
+            'p1': values[2],
+            'p2': values[3],
+            'k3': values[4],
+            'k4': values[5],
+            'k5': values[6],
+            'k6': values[7],
+        }
+    return {'k1': 0.0, 'k2': 0.0, 'k3': 0.0, 'k4': 0.0, 'k5': 0.0, 'k6': 0.0, 'p1': 0.0, 'p2': 0.0}
+
+
+def has_distortion(cam):
+    distortion = get_distortion(cam)
+    return any(abs(v) > 1e-12 for v in distortion.values())
+
+
+def resolve_camera_model(cam, camera_model):
+    if camera_model == 'auto':
+        return 'FULL_OPENCV' if has_distortion(cam) else 'PINHOLE'
+    return camera_model.upper()
+
+
+def camera_params_for_model(cam, model):
+    fx = cam['fx']
+    fy = cam['fy']
+    cx = cam['cx']
+    cy = cam['cy']
+    distortion = get_distortion(cam)
+
+    if model == 'PINHOLE':
+        return [fx, fy, cx, cy]
+    if model == 'OPENCV':
+        return [fx, fy, cx, cy, distortion['k1'], distortion['k2'], distortion['p1'], distortion['p2']]
+    if model == 'FULL_OPENCV':
+        return [
+            fx, fy, cx, cy,
+            distortion['k1'], distortion['k2'], distortion['p1'], distortion['p2'],
+            distortion['k3'], distortion['k4'], distortion['k5'], distortion['k6'],
+        ]
+    raise ValueError(f"Unsupported camera model: {model}")
+
+
+def write_cameras_txt(cameras, output_path, camera_model='auto'):
     """Write cameras.txt in COLMAP format"""
     with open(output_path, 'w') as f:
         f.write("# Camera list with one line of data per camera:\n")
@@ -529,15 +661,13 @@ def write_cameras_txt(cameras, output_path):
         
         for i, cam in enumerate(cameras):
             camera_id = i + 1  # COLMAP uses 1-based indexing
-            model = "PINHOLE"
+            model = resolve_camera_model(cam, camera_model)
             width = cam['width']
             height = cam['height']
-            fx = cam['fx']
-            fy = cam['fy']
-            cx = cam['cx']
-            cy = cam['cy']
+            params = camera_params_for_model(cam, model)
+            params_str = " ".join(str(p) for p in params)
             
-            f.write(f"{camera_id} {model} {width} {height} {fx} {fy} {cx} {cy}\n")
+            f.write(f"{camera_id} {model} {width} {height} {params_str}\n")
     
     print(f"Written {len(cameras)} cameras to {output_path}")
 
@@ -693,11 +823,11 @@ def verify_images_exist(cameras, images_dir):
 
 def main():
     parser = argparse.ArgumentParser(description='Convert cameras.json and images to COLMAP format')
-    parser.add_argument('--cameras-json', default='data1.15/process/selfdataprocess/origin_images/lf/tool/cameras.json',
+    parser.add_argument('--cameras-json', default='data/7.7/calib0.3343.json',
                         help='Path to cameras.json file with corrected parameters')
-    parser.add_argument('--images-dir', default='data1.15/process/selfdataprocess/origin_images/lf/undistortimages',
+    parser.add_argument('--images-dir', default='data/7.7/Photo',
                         help='Directory containing corrected images')
-    parser.add_argument('--output-dir', default='data1.15/process/selfdataprocess/origin_images/lf/sparse/0',
+    parser.add_argument('--output-dir', default='data/7.7/sparse/0',
                         help='Output directory for COLMAP files')
     parser.add_argument('--verify-images', action='store_true',
                         help='Verify that all images exist before processing')
@@ -707,6 +837,8 @@ def main():
                         help='Enable detailed quaternion conversion debugging output')
     parser.add_argument('--pose-format', choices=['auto', 'ctw', 'wtc', 'tcw'], default='wtc',
                         help='Input pose format: auto (detect), ctw (camera-to-world), wtc (world-to-camera), tcw (camera-to-world variant)')
+    parser.add_argument('--camera-model', choices=['auto', 'pinhole', 'opencv', 'full_opencv'], default='auto',
+                        help='COLMAP camera model. auto uses FULL_OPENCV when distortion is present, otherwise PINHOLE')
     
     args = parser.parse_args()
     
@@ -728,6 +860,8 @@ def main():
     if not images_path.exists():
         print(f"Error: Images directory not found: {args.images_dir}")
         sys.exit(1)
+
+    fill_missing_image_names(cameras, args.images_dir)
     
     # Verify images if requested
     if args.verify_images:
@@ -749,7 +883,7 @@ def main():
     images_txt = output_path / 'images.txt'
     points3d_txt = output_path / 'points3D.txt'
     
-    write_cameras_txt(cameras, cameras_txt)
+    write_cameras_txt(cameras, cameras_txt, camera_model=args.camera_model)
     write_images_txt(cameras, args.images_dir, images_txt, 
                      method=args.quaternion_method, debug=args.debug_quaternion,
                      input_format=args.pose_format)

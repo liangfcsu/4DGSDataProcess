@@ -226,14 +226,14 @@ def extract_frames_from_video(video_path, output_dir, cam_num, fps=None, max_fra
 def main():
     parser = argparse.ArgumentParser(description="从100台相机视频中批量提取帧")
     parser.add_argument('--video-dir', type=str, 
-                       default='data/336',
+                       default='data/5.28myself/video',
                        help='视频文件目录')
     parser.add_argument('--output-dir', type=str,
-                       default='data/336/images',
+                       default='data/5.28myself/videoimages',
                        help='输出根目录')
     parser.add_argument('--fps', type=float, default=None,
                        help='提取帧率（留空表示提取所有帧）')
-    parser.add_argument('--frames-per-second', type=int, default=4,
+    parser.add_argument('--frames-per-second', type=int, default=25,
                        help='每秒均匀提取帧数（例如 2 表示每秒均匀提取 2 帧）')
     parser.add_argument('--max-frames', type=int, default=None,
                        help='每个视频最大提取帧数（留空表示不限制）')

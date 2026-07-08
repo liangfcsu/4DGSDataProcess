@@ -35,15 +35,16 @@ from hloc import extract_features, match_features, triangulation
 # ===============================
 
 # 📁 路径配置
-INPUT_IMAGES_DIR = "data/douyinvideohuaban/190/190frame"      # 输入图像文件夹路径
-INPUT_SPARSE_DIR = "data/sparse/0"    # 输入稀疏重建文件夹路径 (可选，设为None则不使用)
-OUTPUT_DIR = "data/douyinvideohuaban/190/output"          # 输出文件夹路径
+INPUT_IMAGES_DIR = "data/7.7/Photo"      # 输入图像文件夹路径
+INPUT_SPARSE_DIR = "data/7.7/sparse/0"    # 输入稀疏重建文件夹路径 (可选，设为None则不使用)
+OUTPUT_DIR = "data/7.7/output"          # 输出文件夹路径
 
 # 🔍 SuperPoint特征提取参数
 SUPERPOINT_MAX_KEYPOINTS = 4096          # 最大关键点数 (256-4096)
 SUPERPOINT_KEYPOINT_THRESHOLD = 0.005    # 关键点置信度阈值 (0.001-0.1)
 SUPERPOINT_NMS_RADIUS = 4                # 非极大值抑制半径 (1-10)
 SUPERPOINT_RESIZE_MAX = 4000             # 图像最大尺寸 (800-4000)
+SUPERPOINT_NUM_WORKERS = 0               # DataLoader进程数；沙箱/受限环境建议为0
 
 # 🎯 SuperGlue匹配参数
 SUPERGLUE_WEIGHTS = "indoor"            # 预训练权重 ("indoor" 或 "outdoor")
@@ -95,11 +96,17 @@ def parse_colmap_image_names(images_txt_path: Path):
     expect_image_line = True
     with open(images_txt_path, 'r') as f:
         for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
+            stripped = line.strip()
+            if stripped.startswith('#'):
+                continue
+            # 空行代表无3D点的POINTS2D行，仍需参与双行切换逻辑
+            if not stripped:
+                if not expect_image_line:
+                    # 空行作为POINTS2D行，切换回期待图像行
+                    expect_image_line = True
                 continue
             if expect_image_line:
-                parts = line.split()
+                parts = stripped.split()
                 if len(parts) >= 10:
                     names.append(parts[9])
                 expect_image_line = False
@@ -141,7 +148,14 @@ def rewrite_colmap_images_txt_names(images_txt_path: Path, name_map: dict):
 
     for line in lines:
         s = line.strip()
-        if not s or s.startswith('#'):
+        if s.startswith('#'):
+            new_lines.append(line)
+            continue
+
+        if not s:
+            # 空行代表无3D点的POINTS2D行，仍需参与双行切换逻辑
+            if not expect_image_line:
+                expect_image_line = True
             new_lines.append(line)
             continue
 
@@ -165,8 +179,13 @@ def rewrite_colmap_images_txt_names(images_txt_path: Path, name_map: dict):
 
 def main():
     """主函数"""
+    if '--test' in sys.argv[1:]:
+        ok = validate_configuration()
+        check_gpu_availability()
+        print("✅ 测试完成" if ok else "❌ 测试失败")
+        return
+
     # 检查是否提供了命令行参数（除了脚本名以外的参数）
-    import sys
     provided_args = [arg for arg in sys.argv[1:] if not arg.startswith('--test')]
     has_args = len(provided_args) > 0
     
@@ -174,13 +193,13 @@ def main():
         # 使用命令行参数
         parser = argparse.ArgumentParser(description='SuperGlue点云生成器 - 支持命令行参数')
         parser.add_argument('--images-dir', type=str, 
-                           default="data/publicdata/coffee_martini_files/20frams",
+                           default="data/5.28myself/undistorted",
                            help='输入图像文件夹路径')
         parser.add_argument('--sparse-dir', type=str, 
-                   default="data/publicdata/coffee_martini_files/superglue/3dgs_training_data/sparse",
+                   default="data/5.28myself/sparse/0",
                            help='输入稀疏重建文件夹路径 (可选)')
         parser.add_argument('--output-dir', type=str, 
-                           default="data/publicdata/coffee_martini_files/superglue_20frams_output",
+                           default="data/5.28myself/output",
                            help='输出文件夹路径')
         parser.add_argument('--max-keypoints', type=int, default=4096,
                            help='SuperPoint最大关键点数 (256-4096)')
@@ -190,6 +209,8 @@ def main():
                            help='SuperPoint非极大值抑制半径 (1-10)')
         parser.add_argument('--resize-max', type=int, default=4000,
                            help='SuperPoint图像最大尺寸 (800-4000)')
+        parser.add_argument('--num-workers', type=int, default=0,
+                           help='特征提取DataLoader进程数；受限环境建议为0')
         parser.add_argument('--superglue-weights', type=str, default="indoor",
                            choices=['indoor', 'outdoor'],
                            help='SuperGlue预训练权重')
@@ -212,6 +233,7 @@ def main():
         keypoint_threshold = args.keypoint_threshold
         nms_radius = args.nms_radius
         resize_max = args.resize_max
+        num_workers = args.num_workers
         superglue_weights = args.superglue_weights
         sinkhorn_iterations = args.sinkhorn_iterations
         match_threshold = args.match_threshold
@@ -224,6 +246,7 @@ def main():
         keypoint_threshold = SUPERPOINT_KEYPOINT_THRESHOLD
         nms_radius = SUPERPOINT_NMS_RADIUS
         resize_max = SUPERPOINT_RESIZE_MAX
+        num_workers = SUPERPOINT_NUM_WORKERS
         superglue_weights = SUPERGLUE_WEIGHTS
         sinkhorn_iterations = SUPERGLUE_SINKHORN_ITERATIONS
         match_threshold = SUPERGLUE_MATCH_THRESHOLD
@@ -383,7 +406,7 @@ def main():
                 }
             }
 
-            extract_features.main(feature_conf, working_images_dir, feature_path=features_path)
+            extract_features.main(feature_conf, working_images_dir, feature_path=features_path, num_workers=num_workers)
             print(f"✅ 特征提取完成 (耗时: {time.time() - step_start:.1f}s)")
         except Exception as e:
             print(f"❌ 特征提取失败: {e}")
@@ -429,7 +452,7 @@ def main():
                 }
             }
 
-            match_features.main(matcher_conf, pairs_path, features=features_path, matches=matches_path)
+            match_features.main(matcher_conf, pairs_path, features=features_path, matches=matches_path, num_workers=num_workers)
             print(f"✅ SuperGlue匹配完成 (耗时: {time.time() - step_start:.1f}s)")
         except Exception as e:
             print(f"❌ SuperGlue匹配失败: {e}")
