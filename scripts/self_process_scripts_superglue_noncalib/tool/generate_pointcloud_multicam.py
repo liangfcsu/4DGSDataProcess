@@ -7,20 +7,19 @@
 import json
 import numpy as np
 from pathlib import Path
-import h5py
-import pycolmap
-from hloc import extract_features, match_features, pairs_from_exhaustive
-from hloc.utils import io
 import shutil
 import time
 import re
 import sys
 import argparse
 
-# 添加third_party路径 - 使用绝对路径
+# 添加hloc和third_party路径 - 使用绝对路径，必须在导入hloc之前完成
 script_dir = Path(__file__).parent.absolute()
 hierarchical_loc_path = script_dir.parent / "Hierarchical-Localization"
 third_party_path = hierarchical_loc_path / "third_party"
+
+if hierarchical_loc_path.exists():
+    sys.path.insert(0, str(hierarchical_loc_path.absolute()))
 
 # 添加SuperGlue到Python路径
 if third_party_path.exists():
@@ -28,6 +27,11 @@ if third_party_path.exists():
     if superglue_path.exists():
         sys.path.insert(0, str(third_party_path.absolute()))
         sys.path.insert(0, str(superglue_path.absolute()))
+
+import h5py
+import pycolmap
+from hloc import extract_features, match_features, pairs_from_exhaustive
+from hloc.utils import io
 
 # 检查SuperGlue可用性
 def check_third_party_availability():

@@ -1,0 +1,5 @@
+python scripts/multicam_4dgs_pipeline/run_pipeline.py \
+  --video-dir data/lf \
+  --output-dir data/lf_4dgs \
+  --max-frames 0 \
+  --gpus auto

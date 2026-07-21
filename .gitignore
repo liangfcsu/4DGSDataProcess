@@ -11,6 +11,7 @@ screenshots
 data/
 *.ply
 *.pth
+!scripts/multicam_4dgs_pipeline/Hierarchical-Localization/third_party/SuperGluePretrainedNetwork/models/weights/*.pth
 *.pt
 *.bin
 *.npy
