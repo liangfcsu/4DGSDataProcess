@@ -60,3 +60,10 @@ python scripts/self_process_scripts_superglue_mutil_sparse/superglue_mutil.py \
   --start-frame 241 \
   --end-frame 300 \
   --gpu 3
+
+python scripts/self_process_scripts_superglue_mutil_sparse/superglue_mutil.py \
+  --images-dir data/huabantraindata/ims \
+  --sparse-dir data/huabantraindata/sparse/0 \
+  --output-dir data/huabantraindata/frame_superglue_output \
+  --start-frame 262 \
+  --end-frame 300

@@ -160,6 +160,7 @@ def main(
     matches: Optional[Path] = None,
     features_ref: Optional[Path] = None,
     overwrite: bool = False,
+    num_workers: int = 5,
 ) -> Path:
     if isinstance(features, Path) or Path(features).exists():
         features_q = features
@@ -178,7 +179,7 @@ def main(
 
     if features_ref is None:
         features_ref = features_q
-    match_from_paths(conf, pairs, matches, features_q, features_ref, overwrite)
+    match_from_paths(conf, pairs, matches, features_q, features_ref, overwrite, num_workers)
 
     return matches
 
@@ -214,6 +215,7 @@ def match_from_paths(
     feature_path_q: Path,
     feature_path_ref: Path,
     overwrite: bool = False,
+    num_workers: int = 5,
 ) -> Path:
     logger.info(
         "Matching local features with configuration:" f"\n{pprint.pformat(conf)}"
@@ -239,7 +241,7 @@ def match_from_paths(
 
     dataset = FeaturePairsDataset(pairs, feature_path_q, feature_path_ref)
     loader = torch.utils.data.DataLoader(
-        dataset, num_workers=5, batch_size=1, shuffle=False, pin_memory=True
+        dataset, num_workers=num_workers, batch_size=1, shuffle=False, pin_memory=True
     )
     writer_queue = WorkQueue(partial(writer_fn, match_path=match_path), 5)
 

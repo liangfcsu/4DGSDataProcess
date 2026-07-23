@@ -181,11 +181,11 @@ def verify_image_dimensions(image_path, expected_width, expected_height):
 
 def main():
     parser = argparse.ArgumentParser(description='Convert calib.json to cameras.json format')
-    parser.add_argument('--images-dir', default='data1.15/origin/origin_images',
+    parser.add_argument('--images-dir', default='data/images',
                         help='Directory containing original images')
-    parser.add_argument('--calib', default='data1.15/origin/calib/calib0.4723.json',
+    parser.add_argument('--calib', default='data/5.28myself/calib/calib0.3343.json',
                         help='Path to calibration file')
-    parser.add_argument('--output', default='data1.15/process/selfdataprocess/bkprocess/calib/cameras.json',
+    parser.add_argument('--output', default='data/5.28myself/calib',
                         help='Output cameras.json file')
     parser.add_argument('--verify-images', action='store_true',
                         help='Verify actual image dimensions')
@@ -254,8 +254,10 @@ def main():
         "cameras": output_cameras
     }
     
-    # Ensure output directory exists
+    # Ensure output directory exists and handle directory vs file path
     output_path = Path(args.output)
+    if output_path.is_dir() or str(output_path).endswith('/'):
+        output_path = output_path / 'cameras.json'
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     # Write output file with preserved precision

@@ -382,12 +382,12 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser(description='Undistort images and write camera intrinsics to JSON files.')
-    parser.add_argument('--calib', type=str, default='data1.15/origin/calib/calib0.4723.json', help='Path to calibration JSON,原始标定文件')
-    parser.add_argument('--images', type=str, default='data1.15/origin/lf', help='Input images directory')
-    parser.add_argument('--out', type=str, default='data1.15/process/selfdataprocess/origin_images/lf', help='Output images directory for undistorted images')
+    parser.add_argument('--calib', type=str, default='data/7.7/cameras.json', help='Path to calibration JSON,原始标定文件')
+    parser.add_argument('--images', type=str, default='data/7.7/Photo', help='Input images directory')
+    parser.add_argument('--out', type=str, default='data/7.7/undistorted', help='Output images directory for undistorted images')
     parser.add_argument('--no-write-cameras', dest='write_cameras', action='store_false', help='Do not write cameras JSON files')
     parser.add_argument('--alpha', type=float, default=1.0, help='Alpha parameter (deprecated - new method always keeps original size)')
-    parser.add_argument('--tool-dir', type=str, default='data1.15/process/selfdataprocess/origin_images/lf/tool', help='Tool directory to write cameras files')
+    parser.add_argument('--tool-dir', type=str, default='data/7.7/tool', help='Tool directory to write cameras files')
     parser.add_argument('--compat-name', type=str, default='cameras.json', help='Compatibility filename to write in tool dir')
 
     args = parser.parse_args()
