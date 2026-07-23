@@ -11,6 +11,44 @@ from pathlib import Path
 import argparse
 from tqdm import tqdm
 import re
+import sys
+
+
+def _existing_frame_count(output_dir, cam_num):
+    """检查已有输出是否从frame001连续到最后一帧。"""
+    prefix = f"cam{cam_num:03d}frame"
+    temporary_files = sorted(output_dir.glob(f"{prefix}*.tmp.png"))
+    for path in temporary_files:
+        path.unlink()
+
+    numbered = []
+    for path in output_dir.glob(f"{prefix}*.png"):
+        match = re.fullmatch(rf'{re.escape(prefix)}(\d+)\.png', path.name)
+        if match:
+            numbered.append((int(match.group(1)), path))
+    numbered.sort(key=lambda item: item[0])
+
+    ids = [frame_id for frame_id, _ in numbered]
+    expected_ids = list(range(1, len(ids) + 1))
+    if ids != expected_ids:
+        raise ValueError(f"已有帧不连续: 实际帧号={ids[:10]}...{ids[-10:]}")
+
+    # Ctrl+C可能恰好发生在旧版cv2.imwrite期间，只回退无法解码的尾帧。
+    while numbered and cv2.imread(str(numbered[-1][1])) is None:
+        corrupt_path = numbered.pop()[1]
+        print(f"   ⚠️  删除未写完的尾帧: {corrupt_path.name}")
+        corrupt_path.unlink()
+
+    return len(numbered)
+
+
+def _write_image_atomic(output_path, frame):
+    """先写临时文件再原子替换，避免中断留下损坏PNG。"""
+    temporary_path = output_path.with_name(f"{output_path.stem}.tmp.png")
+    if not cv2.imwrite(str(temporary_path), frame):
+        return False
+    os.replace(temporary_path, output_path)
+    return True
 
 
 def _sample_evenly_in_range(start_frame, end_frame, sample_count):
@@ -70,7 +108,7 @@ def _build_uniform_per_second_targets(start_frame, end_frame, video_fps, frames_
 
 def extract_frames_from_video(video_path, output_dir, cam_num, fps=None, max_frames=None,
                               start_second=None, end_second=None,
-                              frames_per_second=None):
+                              frames_per_second=None, resume=False):
     """
     从视频中提取帧
     
@@ -83,6 +121,7 @@ def extract_frames_from_video(video_path, output_dir, cam_num, fps=None, max_fra
         start_second: 起始秒数（None表示从0秒开始）
         end_second: 结束秒数（None表示到视频结尾）
         frames_per_second: 每秒均匀提取帧数（None表示不启用）
+        resume: 从输出目录已有的连续帧之后续提
     """
     # 确保输出目录存在
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -119,8 +158,6 @@ def extract_frames_from_video(video_path, output_dir, cam_num, fps=None, max_fra
         cap.release()
         return 0
 
-    # 定位到起始帧
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     range_frames = end_frame - start_frame
 
     # 计算目标提取策略
@@ -143,18 +180,28 @@ def extract_frames_from_video(video_path, output_dir, cam_num, fps=None, max_fra
         frame_interval = 1
         print(f"   提取所有帧")
 
-    # 提取帧
-    frame_count = start_frame
-    local_frame_count = 0
-    saved_count = 0
-
     if use_uniform_per_second:
         expected_saved = len(target_frame_indices)
     else:
         expected_saved = (range_frames + frame_interval - 1) // frame_interval
-    pbar_total = expected_saved if max_frames is None else min(expected_saved, max_frames)
+    target_saved_count = expected_saved if max_frames is None else min(expected_saved, max_frames)
 
-    pbar = tqdm(total=pbar_total,
+    saved_count = _existing_frame_count(output_dir, cam_num) if resume else 0
+    if saved_count > target_saved_count:
+        cap.release()
+        raise ValueError(
+            f"已有 {saved_count} 帧，超过当前任务目标 {target_saved_count} 帧；"
+            "请确保续跑参数与原任务一致"
+        )
+    if resume and saved_count:
+        print(f"   ♻️  已有连续帧: {saved_count}/{target_saved_count}")
+    if saved_count == target_saved_count:
+        cap.release()
+        print(f"   ⏭️  已完成，跳过: {output_dir}")
+        return saved_count
+
+    pbar = tqdm(total=target_saved_count,
+                initial=saved_count,
                 desc=f"Cam{cam_num:03d}", 
                 unit="frame")
 
@@ -164,8 +211,11 @@ def extract_frames_from_video(video_path, output_dir, cam_num, fps=None, max_fra
         print(f"   时间范围: {start_show}s - {end_show}s")
 
     if use_uniform_per_second:
-        target_pos = 0
+        target_pos = saved_count
         next_target = target_frame_indices[target_pos] if target_frame_indices else None
+        frame_count = next_target if next_target is not None else end_frame
+        if next_target is not None:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, next_target)
 
         while frame_count < end_frame and next_target is not None:
             ret, frame = cap.read()
@@ -178,7 +228,8 @@ def extract_frames_from_video(video_path, output_dir, cam_num, fps=None, max_fra
                 output_path = output_dir / frame_filename
 
                 # 保存帧
-                cv2.imwrite(str(output_path), frame)
+                if not _write_image_atomic(output_path, frame):
+                    raise IOError(f"写入图像失败: {output_path}")
                 saved_count += 1
                 pbar.update(1)
 
@@ -193,6 +244,10 @@ def extract_frames_from_video(video_path, output_dir, cam_num, fps=None, max_fra
 
             frame_count += 1
     else:
+        local_frame_count = saved_count * frame_interval
+        frame_count = start_frame + local_frame_count
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count)
+
         while frame_count < end_frame:
             ret, frame = cap.read()
             if not ret:
@@ -205,7 +260,8 @@ def extract_frames_from_video(video_path, output_dir, cam_num, fps=None, max_fra
                 output_path = output_dir / frame_filename
 
                 # 保存帧
-                cv2.imwrite(str(output_path), frame)
+                if not _write_image_atomic(output_path, frame):
+                    raise IOError(f"写入图像失败: {output_path}")
                 saved_count += 1
                 pbar.update(1)
 
@@ -237,6 +293,8 @@ def main():
                        help='每秒均匀提取帧数（例如 2 表示每秒均匀提取 2 帧）')
     parser.add_argument('--all-frames', action='store_true',
                        help='按原始帧顺序提取；可与 --max-frames 组合提取前N帧')
+    parser.add_argument('--resume', action='store_true',
+                       help='跳过已完成相机，从部分相机的下一帧续提')
     parser.add_argument('--max-frames', type=int, default=None,
                        help='每个视频最大提取帧数（留空表示不限制）')
     parser.add_argument('--start-second', type=float, default=None,
@@ -359,7 +417,8 @@ def main():
                 max_frames=args.max_frames,
                 start_second=args.start_second,
                 end_second=args.end_second,
-                frames_per_second=args.frames_per_second
+                frames_per_second=args.frames_per_second,
+                resume=args.resume
             )
             total_frames += saved_count
             processed_videos += 1
@@ -388,6 +447,12 @@ def main():
     print(f"   ...")
     print(f"   {output_base_dir}/cam100/cam100frame001.png")
 
+    return 1 if failed_videos else 0
+
 
 if __name__ == '__main__':
-    main()
+    try:
+        sys.exit(main() or 0)
+    except KeyboardInterrupt:
+        print("\n⏹️  提帧已中断，已写完的帧可用 --resume 续提。")
+        sys.exit(130)

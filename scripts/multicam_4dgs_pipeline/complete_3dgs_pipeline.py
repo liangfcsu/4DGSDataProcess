@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
 complete_3dgs_pipeline.py - 无标定版本（两阶段处理）
-python scripts/self_process_scripts_superglue_noncalib/complete_3dgs_pipeline.py --stage all --feature-method superpoint --matcher-method superglue --non-interactive
-python scripts/self_process_scripts_superglue_noncalib/complete_3dgs_pipeline.py --undistort-method colmap --non-interactive
-python scripts/self_process_scripts_superglue_noncalib/complete_3dgs_pipeline.py --undistort-method colmap --non-interactive
+本脚本已复制到独立工具包中，通常由同目录的 run_pipeline.py 自动调用。
 完整的3DGS训练数据预处理管线（无需预先标定文件）。
 
 处理流程：

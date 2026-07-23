@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import shlex
 import shutil
 import subprocess
@@ -103,7 +104,10 @@ def detect_gpu_ids(spec: str) -> list[int]:
 
 
 def python_has_dependencies(executable: Path) -> bool:
-    probe = "import cv2,numpy,torch,h5py,pycolmap; assert torch.cuda.is_available()"
+    probe = (
+        "import cv2,numpy,torch,h5py,pycolmap,tqdm,PIL,packaging; "
+        "assert torch.cuda.is_available()"
+    )
     try:
         return subprocess.run(
             [str(executable), "-c", probe],
@@ -127,6 +131,7 @@ def choose_python(explicit: str | None) -> Path:
     if conda_prefix:
         candidates.append(Path(conda_prefix) / "bin" / "python")
     candidates.extend([
+        Path.home() / "miniconda3" / "envs" / "4dgsplayer" / "bin" / "python",
         Path.home() / "miniconda3" / "envs" / "3dgslf" / "bin" / "python",
         Path.home() / "miniconda3" / "envs" / "4dgs" / "bin" / "python",
     ])
@@ -138,26 +143,66 @@ def choose_python(explicit: str | None) -> Path:
         seen.add(candidate)
         if python_has_dependencies(candidate):
             return candidate
-    raise PipelineError("找不到具备cv2/torch/h5py/pycolmap和CUDA的Python；请用 --python 指定")
+    raise PipelineError(
+        "找不到具备cv2/torch/h5py/pycolmap/tqdm/Pillow/packaging和CUDA的Python；"
+        "请激活环境或用 --python 指定"
+    )
 
 
 def run_checked(command: list[str], *, env: dict[str, str] | None = None) -> None:
     print(f"\n$ {shlex.join(command)}", flush=True)
-    result = subprocess.run(command, env=env)
-    if result.returncode != 0:
-        raise PipelineError(f"命令失败（退出码 {result.returncode}）: {shlex.join(command)}")
+    process = subprocess.Popen(command, env=env, start_new_session=True)
+    try:
+        returncode = process.wait()
+    except KeyboardInterrupt:
+        stop_processes([process])
+        raise
+    if returncode != 0:
+        raise PipelineError(f"命令失败（退出码 {returncode}）: {shlex.join(command)}")
+
+
+def stop_processes(processes: list[subprocess.Popen]) -> None:
+    """先用SIGINT让子进程收尾，超时后再逐级终止。"""
+    running = [process for process in processes if process.poll() is None]
+    for process in running:
+        try:
+            os.killpg(process.pid, signal.SIGINT)
+        except ProcessLookupError:
+            pass
+    for process in running:
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+    for process in running:
+        if process.poll() is None:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
 
 
 def run_parallel(commands: list[tuple[list[str], dict[str, str] | None]]) -> None:
     processes = []
     for command, env in commands:
         print(f"\n$ {shlex.join(command)}", flush=True)
-        processes.append((command, subprocess.Popen(command, env=env)))
+        processes.append((command, subprocess.Popen(command, env=env, start_new_session=True)))
     failures = []
-    for command, process in processes:
-        returncode = process.wait()
-        if returncode != 0:
-            failures.append((returncode, command))
+    try:
+        for command, process in processes:
+            returncode = process.wait()
+            if returncode != 0:
+                failures.append((returncode, command))
+    except KeyboardInterrupt:
+        stop_processes([process for _, process in processes])
+        raise
     if failures:
         details = "; ".join(f"rc={code}: {shlex.join(command)}" for code, command in failures)
         raise PipelineError(f"并行任务失败: {details}")
@@ -390,7 +435,10 @@ def main() -> int:
 
         # 1. 提取所有帧（按相机分片并行）
         if "extract_frames" not in completed:
-            shutil.rmtree(raw_ims, ignore_errors=True)
+            if not args.resume:
+                shutil.rmtree(raw_ims, ignore_errors=True)
+            elif raw_ims.exists():
+                print(f"♻️  从已有提帧结果续跑: {raw_ims}")
             worker_count = args.extract_workers or len(gpu_ids)
             chunks = balanced_chunks(videos, worker_count)
             commands = []
@@ -408,6 +456,8 @@ def main() -> int:
                     command.extend(["--frames-per-second", str(args.frames_per_second)])
                 if args.max_frames:
                     command.extend(["--max-frames", str(args.max_frames)])
+                if args.resume:
+                    command.append("--resume")
                 env = os.environ.copy()
                 env["CUDA_VISIBLE_DEVICES"] = str(gpu_ids[index % len(gpu_ids)])
                 commands.append((command, env))
@@ -542,6 +592,13 @@ def main() -> int:
             shutil.rmtree(work_dir)
         print_summary(output_dir, len(camera_ids), frame_count, gpu_ids)
         return 0
+
+    except KeyboardInterrupt:
+        print("\n⏹️  流水线已中断，所有子进程已停止。", file=sys.stderr)
+        if work_dir.exists():
+            print(f"🧩 中间结果已保留: {work_dir}", file=sys.stderr)
+            print("使用原命令加 --resume 可从已完成的相机/帧继续。", file=sys.stderr)
+        return 130
 
     except (PipelineError, OSError, json.JSONDecodeError) as exc:
         print(f"\n❌ 流水线失败: {exc}", file=sys.stderr)

@@ -7,7 +7,7 @@ SuperGlue点云生成器 - 简单配置版本
 直接修改下面的参数，然后运行脚本即可生成点云
 如果想要在其他帧生成点云 需要把sparse文件夹中的images.txt中的图像名改为对应帧的图像名（例如cam001frame030.png）以对齐输入图像和稀疏重建的图像名，或者直接传入对齐后的图像目录（例如之前生成的aligned_images目录）以自动对齐图像名
 示例：
-python scripts/self_process_scripts_superglue/4.superglue_simple.py
+通常由同目录的 run_pipeline.py 自动按帧区间和GPU调用。
 """
 
 import numpy as np

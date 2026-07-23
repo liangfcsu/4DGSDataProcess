@@ -4,3 +4,5 @@ tqdm
 torch
 h5py
 pycolmap
+Pillow
+packaging

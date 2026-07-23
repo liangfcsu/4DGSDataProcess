@@ -3,3 +3,10 @@ python scripts/multicam_4dgs_pipeline/run_pipeline.py \
   --output-dir data/lf_4dgs \
   --max-frames 0 \
   --gpus auto
+
+  python scripts/multicam_4dgs_pipeline/run_pipeline.py \
+  --video-dir data/ls \
+  --output-dir data/ls_4dgs \
+  --max-frames 0 \
+  --gpus auto \
+  --resume
