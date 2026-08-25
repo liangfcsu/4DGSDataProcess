@@ -2,6 +2,16 @@
 
 多相机 3D Gaussian Splatting 数据处理工具集，用于从视频到 3DGS 训练数据的完整预处理流程。
 
+> **🆕 统一入口 `scripts/gs_pipeline/`**：一条命令覆盖「多相机视频 / 多帧图像 / 单帧图像」
+> × 「rig 标定 / libCalib 标定 / 无标定自动 SfM」的全部组合，输出 `images/ ims/ persparse/ sparse/0/`。
+> 详见 [scripts/gs_pipeline/README.md](scripts/gs_pipeline/README.md)。
+>
+> ```bash
+> # 视频+无标定 / 图像+rig标定 / 图像+libCalib标定
+> python scripts/gs_pipeline/run.py --input <目录> --output <目录> [--rig-json …|--calib-json …]
+> python scripts/gs_pipeline/run.py --input <目录> --output <目录> --dry-run   # 先看计划，不执行
+> ```
+
 ## 📋 目录
 
 - [功能特性](#功能特性)
@@ -178,19 +188,16 @@ python scripts/colmap_process_scripts/convert_model_bin_to_txt.py
 python scripts/colmap_process_scripts/convert.py
 ```
 
-#### SuperGlue 无标定流程
+#### 统一流水线（推荐，覆盖标定/无标定与视频/图像）
 
 ```bash
-# 完整的 3DGS 管线
-python scripts/self_process_scripts_superglue_noncalib/complete_3dgs_pipeline.py
+# 无标定（自动 SfM）
+python scripts/gs_pipeline/run.py --input <输入目录> --output <输出目录>
 ```
 
-这是一个集成脚本，包含：
-1. 图像去畸变（用于 HLOC）
-2. SuperGlue 特征匹配
-3. COLMAP SfM 重建
-4. 点云生成
-5. 参数转换为 3DGS 格式
+`gs_pipeline` 内部集成：图像/视频采集 → 标定或 COLMAP SfM 自动估参 →
+去畸变 → SuperGlue 逐帧三角化 → 组装 4DGS 数据集。详见
+[scripts/gs_pipeline/README.md](scripts/gs_pipeline/README.md)。
 
 ## 🔄 工作流程
 
@@ -209,15 +216,16 @@ python videoprocess_tool/1.1extract_first_frames.py \
   --video-dir publicdata/coffee_martini/videos \
   --output-dir publicdata/coffee_martini/first_frames
 
-# 步骤 3: 运行 SuperGlue 无标定完整流程
-python scripts/self_process_scripts_superglue_noncalib/complete_3dgs_pipeline.py
+# 步骤 3: 运行统一流水线（提帧→标定/SfM→去畸变→逐帧点云→组装，一步到位）
+python scripts/gs_pipeline/run.py \
+  --input publicdata/coffee_martini/videos \
+  --output publicdata/coffee_martini/4dgs \
+  --max-frames 120
 
-# 步骤 4: 使用估计参数对所有帧去畸变
-python videoprocess_tool/3.0undistort_all_frames_batch.py
-
-# 现在 undistorted_all_frames_complete_superglue/ 目录下的数据
-# 可直接用于 3DGS 训练
+# 输出目录 images/ ims/ persparse/ sparse/0/ 可直接用于 4DGS 训练
 ```
+
+> 上面的“步骤 1/2”仅演示单独的提帧工具；实际使用 `gs_pipeline/run.py` 会自动完成采集，无需手动提帧。
 
 ## 📁 目录结构
 
@@ -231,16 +239,17 @@ python videoprocess_tool/3.0undistort_all_frames_batch.py
 │   └── 3.1undistort_all_frames_batch_colmap.py  # COLMAP 去畸变
 │
 ├── scripts/                     # 数据处理脚本
-│   ├── colmap_process_scripts/           # COLMAP 相关
-│   ├── self_process_scripts_agisoft/     # Agisoft 流程
-│   ├── self_process_scripts_superglue/   # SuperGlue 有标定流程
-│   └── self_process_scripts_superglue_noncalib/  # SuperGlue 无标定流程
-│       ├── complete_3dgs_pipeline.py     # 完整管线
-│       ├── Hierarchical-Localization/    # HLOC (子模块)
-│       └── tool/
-│           ├── convert_colmap_to_calib.py
-│           ├── generate_pointcloud_multicam.py
-│           └── undistort_for_hloc.py
+│   ├── gs_pipeline/                      # ⭐ 统一流水线（合并后的单一项目）
+│   │   ├── run.py                        # 唯一入口（视频/图像 × 标定/无标定）
+│   │   ├── pipeline/                     # 采集/标定/去畸变/逐帧点云/组装 调度与粘合
+│   │   ├── stages/                       # libCalib 标定转换
+│   │   └── engine/                       # 重建引擎（提帧/SfM/去畸变/逐帧三角化 + 单份 HLOC）
+│   │       ├── complete_3dgs_pipeline.py
+│   │       ├── generate_per_frame_sparse.py
+│   │       ├── Hierarchical-Localization/   # 唯一一份 HLOC/SuperGlue（含权重）
+│   │       └── tool/
+│   ├── colmap_process_scripts/           # COLMAP 相关（与本合并无关）
+│   └── self_process_scripts_agisoft/     # Agisoft 流程（与本合并无关）
 │
 ├── .gitignore
 ├── .gitmodules
