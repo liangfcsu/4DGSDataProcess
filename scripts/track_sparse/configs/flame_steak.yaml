@@ -1,0 +1,84 @@
+# flame_steak: 21 cameras, 2704x2028, 30 FPS, 300 frames.
+#
+# This file contains tracking/geometry parameters. Input/output paths, frame
+# range, GPU selection, and resume/overwrite are execution controls and remain
+# CLI arguments.
+
+schema_version: "1.0.0"
+
+data:
+  image_size_tolerance_px: 1
+  allow_missing_frames: true
+
+# Six neighbours provide enough overlap around the 21-camera ring without
+# paying for an all-pairs (210 pairs per spawn frame) match graph.
+camera_graph:
+  top_k: 6
+  min_overlap: 0.10
+  max_view_angle_deg: 100.0
+  min_baseline_ratio: 0.01
+  overlap_sample_points: 20000
+
+# 1600 px keeps sub-pixel geometry useful while reducing the cost of the
+# original 2704x2028 frames. Half precision is only used for the HDF5 cache.
+features:
+  extractor: superpoint
+  max_keypoints: 4096
+  keypoint_threshold: 0.005
+  nms_radius: 4
+  resize_max: 1600
+  half_precision_cache: true
+
+matching:
+  matcher: superglue
+  weights: outdoor
+  sinkhorn_iterations: 50
+  min_score: 0.20
+
+spatial:
+  epipolar_threshold_px: 1.5
+
+# At 30 FPS, interval=10 adds new seeds every 0.33 s. Three-view birth is
+# deliberately stricter than the two-view minimum used after a track exists.
+spawn:
+  interval: 10
+  min_seed_views: 3
+  duplicate_radius_px: 3.0
+  min_duplicate_views: 2
+
+# Match both t->t+1 and t->t+2 so a one-frame miss can reconnect.
+temporal:
+  tracker: superglue
+  offsets: [1, 2]
+  min_score: 0.20
+  min_camera_votes: 2
+
+triangulation:
+  min_views: 2
+  min_angle_deg: 1.0
+  max_reprojection_error_px: 3.0
+  robust_loss: huber
+  max_refinement_iterations: 50
+
+# Raw-video preprocessing creates one fixed reference sparse model, not a
+# per-frame persparse cloud, so there is no independent cloud to verify here.
+sparse_verify:
+  enabled: false
+  nn_scale: 3.0
+  confidence_weight: 0.15
+
+# 5/15 frames correspond to about 0.17/0.50 s at 30 FPS.
+track:
+  tentative_frames: 3
+  max_occlusion_gap: 5
+  max_lost_gap: 15
+
+classification:
+  min_valid_frames: 5
+  static_baseline_ratio: 0.002
+  dynamic_threshold_multiplier: 3.0
+
+export:
+  npz: true
+  ply: true
+  overlays: true

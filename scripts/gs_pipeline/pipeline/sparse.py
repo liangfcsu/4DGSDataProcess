@@ -74,3 +74,20 @@ def generate_per_frame_sparse(undistorted_dir: Path, reference_sparse: Path, out
         raise PipelineError(
             f"逐帧点云不完整：缺少={sorted(expected - actual)}, 多出={sorted(actual - expected)}"
         )
+
+    empty_frames = []
+    for name in sorted(expected):
+        points_file = out_persparse / name
+        has_points = any(
+            line.strip() and not line.lstrip().startswith("#")
+            for line in points_file.read_text(encoding="utf-8").splitlines()
+        )
+        if not has_points:
+            empty_frames.append(name.removesuffix("_points3D.txt"))
+    if empty_frames:
+        preview = ", ".join(empty_frames[:12])
+        suffix = " …" if len(empty_frames) > 12 else ""
+        print(
+            f"  ⚠️ {len(empty_frames)} 帧未三角化出 3D 点，保留空点云并继续: "
+            f"{preview}{suffix}"
+        )

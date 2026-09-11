@@ -1,7 +1,7 @@
 1.colmap database_creator     --database_path ./database.db
 2.colmap feature_extractor --database_path ./database.db --image_path ./images  --SiftExtraction.max_image_size 4096 --SiftExtraction.max_num_features 16384 --SiftExtraction.estimate_affine_shape 1 --SiftExtraction.domain_size_pooling 1
 3.colmap exhaustive_matcher --database_path ./database.db
-3.5colmap mapper --database_path ./database.db --image_path ./seg  --output_path ./sparse
+3.5colmap mapper --database_path ./database.db --image_path ./images   --output_path ./sparse
 4.colmap image_undistorter --image_path ./images --input_path ./sparse/0 --output_path ./dense --output_type COLMAP
 
 

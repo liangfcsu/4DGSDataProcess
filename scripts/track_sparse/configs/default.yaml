@@ -1,0 +1,68 @@
+schema_version: "1.0.0"
+
+data:
+  image_size_tolerance_px: 1
+  allow_missing_frames: true
+
+camera_graph:
+  top_k: 6
+  min_overlap: 0.10
+  max_view_angle_deg: 100.0
+  min_baseline_ratio: 0.01
+  overlap_sample_points: 20000
+
+features:
+  extractor: superpoint
+  max_keypoints: 4096
+  keypoint_threshold: 0.005
+  nms_radius: 4
+  resize_max: 1600
+  half_precision_cache: true
+
+matching:
+  matcher: superglue
+  weights: outdoor
+  sinkhorn_iterations: 50
+  min_score: 0.20
+
+spatial:
+  epipolar_threshold_px: 1.5
+
+spawn:
+  interval: 10
+  min_seed_views: 3
+  duplicate_radius_px: 3.0
+  min_duplicate_views: 2
+
+temporal:
+  tracker: superglue
+  offsets: [1, 2]
+  min_score: 0.20
+  min_camera_votes: 2
+
+triangulation:
+  min_views: 2
+  min_angle_deg: 1.0
+  max_reprojection_error_px: 3.0
+  robust_loss: huber
+  max_refinement_iterations: 50
+
+sparse_verify:
+  enabled: true
+  nn_scale: 3.0
+  confidence_weight: 0.15
+
+track:
+  tentative_frames: 3
+  max_occlusion_gap: 5
+  max_lost_gap: 15
+
+classification:
+  min_valid_frames: 5
+  static_baseline_ratio: 0.002
+  dynamic_threshold_multiplier: 3.0
+
+export:
+  npz: true
+  ply: true
+  overlays: true

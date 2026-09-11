@@ -30,3 +30,4 @@ submodules/*/*.egg-info/
 submodules/*/dist/
 
 huabantraindata
+outputs/

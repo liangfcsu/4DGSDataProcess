@@ -9,28 +9,30 @@
 
   标定来源（互斥；都不给则走无标定自动 SfM）
     --rig-json   FILE   refined_rig_group.json（有理径向畸变，rig 已知内外参）
-    --calib-json FILE   libCalib calib*.json（多项式畸变，已知内外参）
+    --calib-json FILE   已知内外参 JSON（libCalib 或 frames/OpenCV 格式）
     （缺省）            无标定：首帧 COLMAP SfM 自动估计内外参
 
 输出（--output）：images/ ims/ persparse/ sparse/0/，可直接用于 4DGS 训练。
 
 示例：
   # 多相机视频 + 无标定
-  python run.py --input data/cook_spinach --output data/cook_spinach_4dgs --max-frames 30
+  python scripts/gs_pipeline/run.py --input data/2026-08-10-192847zhishangyue/video --output data/output/zhishangyue --max-frames 1  --overwrite
 
-  # 多相机多帧图像 + rig 标定
-  python run.py --input data/rig_seq --output data/rig_4dgs --rig-json data/rig_seq/refined_rig_group.json
+  # 多相机多帧图像 + 标定
+  python scripts/gs_pipeline/run.py --input data/2026-08-10-192847zhishangyue/video --output data/output/zhishangyue --max-frames 1 --overwrite --calib-json data/2026-08-10-192847zhishangyue/calib/2.json
+
 
   # 多相机单帧图像 + libCalib 标定
-  python scripts/gs_pipeline/run.py --input data/testiamges/liang --output data/testiamges/liangoutputcalib --calib-json data/testiamges/calib0.3343.json
+  python scripts/gs_pipeline/run.py --input data/2026-08-10-191717_0 --output data/output/2026-08-10-191717_0 --calib-json data/testiamges/calib0.3343.json   --overwrite
 
   # 先看清每一步会跑什么命令，不实际执行
-  python run.py --input data/x --output data/x_4dgs --dry-run
+  python scripts/gs_pipeline/run.py --input data/x --output data/x_4dgs --dry-run
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -61,6 +63,34 @@ def detect_input_type(input_dir: Path) -> str:
     if any(p.is_file() and p.suffix.lower() in VIDEO_SUFFIXES for p in input_dir.iterdir()):
         return "videos"
     return "images"
+
+
+def validate_calib_file(path: Path, mode: str) -> str:
+    """开跑前快速校验标定文件与 --rig-json / --calib-json 是否匹配，用错立即提示。"""
+    if not path.is_file():
+        raise PipelineError(f"标定文件不存在: {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PipelineError(f"无法解析标定文件 {path}: {exc}")
+    has_rigs = isinstance(data, dict) and isinstance(data.get("rigs"), list)
+    has_frames = isinstance(data, dict) and isinstance(data.get("frames"), list)
+    looks_libcalib = isinstance(data, list) or (
+        isinstance(data, dict) and ("Calibration" in data or "cameras" in data))
+    if mode == "rig" and not has_rigs:
+        hint = "；这看起来应使用 --calib-json" if looks_libcalib or has_frames else ""
+        raise PipelineError(f"--rig-json 需要含顶层 rigs 列表的 refined_rig_group.json：{path}{hint}")
+    if mode == "libcalib" and has_rigs:
+        raise PipelineError(f"--calib-json 收到的是 rig 文件（含 rigs 列表）：{path}；请改用 --rig-json")
+    if mode == "rig":
+        return "rig"
+    if has_frames:
+        return "opencv_frames"
+    if looks_libcalib:
+        return "libcalib"
+    raise PipelineError(
+        f"--calib-json 结构无法识别：需要顶层 frames、cameras、Calibration 或相机列表：{path}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +126,8 @@ def parse_args() -> argparse.Namespace:
 
     calib = parser.add_mutually_exclusive_group()
     calib.add_argument("--rig-json", default=None, help="refined_rig_group.json（rig 标定）")
-    calib.add_argument("--calib-json", default=None, help="libCalib calib*.json（多项式标定）")
+    calib.add_argument("--calib-json", default=None,
+                       help="已知内外参 JSON（libCalib 或 frames/OpenCV 格式）")
 
     parser.add_argument("--work-dir", default=None, help="中间目录（默认 <output>.work）")
     parser.add_argument("--gpus", default="auto", help="auto 或逗号分隔的 GPU 编号，如 0,1,2,3")
@@ -155,6 +186,11 @@ def main() -> int:
         raise PipelineError("--frame 必须是不小于 1 的帧号")
 
     calib_mode = "rig" if args.rig_json else "libcalib" if args.calib_json else "none"
+    calib_schema = None
+    if calib_mode == "rig":
+        calib_schema = validate_calib_file(Path(args.rig_json).expanduser(), "rig")
+    elif calib_mode == "libcalib":
+        calib_schema = validate_calib_file(Path(args.calib_json).expanduser(), "libcalib")
     input_type = args.input_type if args.input_type != "auto" else detect_input_type(input_dir)
 
     gpu_ids = detect_gpu_ids(args.gpus)
@@ -165,7 +201,8 @@ def main() -> int:
     print("=" * 72)
     print("统一 4DGS 数据处理流水线")
     print(f"输入: {input_dir}（类型: {input_type}）")
-    print(f"标定: {calib_mode}" + (
+    calib_label = "frames/OpenCV" if calib_schema == "opencv_frames" else calib_mode
+    print(f"标定: {calib_label}" + (
         f"  <- {args.rig_json}" if calib_mode == "rig"
         else f"  <- {args.calib_json}" if calib_mode == "libcalib" else "（自动 SfM）"))
     print(f"输出: {output_dir}")
@@ -202,7 +239,8 @@ def main() -> int:
         acquire.acquire_from_images(input_dir, ims_dir, select_frame=args.frame, dry_run=dry_run)
 
     if dry_run:
-        return _dry_run_finish(calib_mode, input_dir, input_type, python, gpu_ids, args, work, output_dir)
+        return _dry_run_finish(calib_mode, calib_schema, input_dir, input_type, python,
+                               gpu_ids, args, work, output_dir)
 
     sequences = discover_cam_sequences(ims_dir)
     cam_ids = sorted(sequences.keys())
@@ -210,7 +248,8 @@ def main() -> int:
     print(f"  相机数: {len(cam_ids)}，每相机帧数: {frame_count}")
 
     # ---- 阶段 2：标定 + 全帧去畸变 → 参考 sparse/0 + undistorted ----
-    print(f"\n[2/4] 标定与去畸变（模式: {calib_mode}）")
+    stage_calib_label = "frames/OpenCV" if calib_schema == "opencv_frames" else calib_mode
+    print(f"\n[2/4] 标定与去畸变（模式: {stage_calib_label}）")
     if calib_mode == "none":
         reference_sparse, undistorted = noncalib.calibrate_and_undistort_sfm(
             work, ims_dir, python, gpu_ids,
@@ -224,12 +263,16 @@ def main() -> int:
                 "scale": args.rig_scale, "iterations": args.rig_iterations,
             })
         else:  # libcalib
-            seed = work / "calibration" / "seed_first_frames"
-            noncalib._build_first_frames(ims_dir, seed)
-            cameras_json = work / "calibration" / "cameras.json"
-            libcalib_to_cameras_json(Path(args.calib_json).resolve(), seed, cameras_json,
-                                     python, dry_run=False)
-            cameras = calibrated.load_libcalib_calibration(cameras_json, cam_ids)
+            calib_path = Path(args.calib_json).resolve()
+            if calib_schema == "opencv_frames":
+                cameras = calibrated.load_opencv_frames_calibration(calib_path, cam_ids)
+            else:
+                seed = work / "calibration" / "seed_first_frames"
+                noncalib._build_first_frames(ims_dir, seed)
+                cameras_json = work / "calibration" / "cameras.json"
+                libcalib_to_cameras_json(calib_path, seed, cameras_json,
+                                         python, dry_run=False)
+                cameras = calibrated.load_libcalib_calibration(cameras_json, cam_ids)
 
         undistorted = work / "undistorted"
         reference_sparse = work / "calibration" / "sparse" / "0"
@@ -265,19 +308,23 @@ def main() -> int:
     return 0
 
 
-def _dry_run_finish(calib_mode, input_dir, input_type, python, gpu_ids, args, work, output_dir) -> int:
+def _dry_run_finish(calib_mode, calib_schema, input_dir, input_type, python, gpu_ids,
+                    args, work, output_dir) -> int:
     """dry-run 下无中间文件，逐阶段打印后续将执行的命令。"""
-    print("\n[2/4] 标定与去畸变（模式: %s）" % calib_mode)
+    calib_label = "frames/OpenCV" if calib_schema == "opencv_frames" else calib_mode
+    print("\n[2/4] 标定与去畸变（模式: %s）" % calib_label)
     if calib_mode == "none":
         noncalib.calibrate_and_undistort_sfm(
             work, work / "ims", python, gpu_ids,
             undistort_workers=args.undistort_workers, dry_run=True)
     elif calib_mode == "rig":
         print("  将用有理径向模型对每台相机全部帧去畸变，并写出 PINHOLE 参考 sparse/0（纯 numpy/cv2，无子进程）")
+    elif calib_schema == "opencv_frames":
+        print("  将直接读取 frames[] 的 OpenCV 内参、畸变和 w2c，按相机编号匹配（自动识别恒定偏移）并写出参考 sparse/0")
     else:
         print("  将用 1.convert_calib_to_cameras_json.py 生成 cameras.json，再多项式去畸变并写出参考 sparse/0")
     print("\n[3/4] 逐帧稀疏点云（多 GPU）")
-    ref_display = (work / "calibration" / "3dgs_training_data" / "sparse" / "0") \
+    ref_display = (work / "calibration" / "reference_sparse" / "0") \
         if calib_mode == "none" else (work / "calibration" / "sparse" / "0")
     sparse_stage.generate_per_frame_sparse(
         work / "undistorted", ref_display, work / "persparse",
@@ -285,7 +332,7 @@ def _dry_run_finish(calib_mode, input_dir, input_type, python, gpu_ids, args, wo
         sg_opts={"max_keypoints": args.max_keypoints, "resize_max": args.resize_max,
                  "superglue_weights": args.superglue_weights}, dry_run=True)
     print("\n[4/4] 组装 4DGS 数据集")
-    assemble_stage.assemble(output_dir, work / "calibration" / "sparse" / "0",
+    assemble_stage.assemble(output_dir, ref_display,
                             work / "undistorted", work / "persparse", dry_run=True)
     print("\n[dry-run] 计划打印完毕，未执行任何实际处理。")
     return 0

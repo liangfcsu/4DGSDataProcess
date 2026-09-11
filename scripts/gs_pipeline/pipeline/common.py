@@ -49,8 +49,11 @@ def reference_image_name(cam_id: int) -> str:
 
 
 def parse_cam_id(name: str) -> int | None:
-    """从文件/目录名解析相机编号：cam001frame020.png→1，cam007→7，001.png→1。"""
-    match = re.search(r"cam0*(\d+)", name, re.IGNORECASE)
+    """从文件/目录名解析相机编号。
+
+    支持 cam001frame020.png、cam_1.mp4、cam-007 和 001.png。
+    """
+    match = re.search(r"cam[_-]?0*(\d+)", name, re.IGNORECASE)
     if match:
         return int(match.group(1))
     stem = Path(name).stem
@@ -65,8 +68,8 @@ def parse_frame_id(name: str) -> int | None:
 
 
 def parse_video_cam_id(stem: str) -> int | None:
-    """视频文件名解析相机号：cam00→0，cam001→1，001→1，20→20。"""
-    match = re.fullmatch(r"cam0*(\d+)", stem, re.IGNORECASE)
+    """视频文件名解析相机号：cam00、cam_1、cam-001、001、20。"""
+    match = re.fullmatch(r"cam[_-]?0*(\d+)", stem, re.IGNORECASE)
     if not match:
         match = re.fullmatch(r"0*(\d+)", stem)
     return int(match.group(1)) if match else None

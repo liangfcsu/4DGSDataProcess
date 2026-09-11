@@ -24,6 +24,7 @@ import numpy as np
 from .common import (
     PipelineError,
     cam_dirname,
+    parse_cam_id,
     reference_image_name,
 )
 
@@ -268,7 +269,7 @@ class CameraCalib:
     fy: float
     cx: float
     cy: float
-    model: str                        # 'rational' | 'polynomial'
+    model: str                        # 'rational' | 'polynomial' | 'opencv'
     pose: tuple                       # COLMAP world-to-camera (qw,qx,qy,qz,tx,ty,tz)
     coeffs: dict | None = None        # rational: parse_d 结果
     dist: list | None = None          # polynomial: [k1,k2,p1,p2,k3]
@@ -391,6 +392,158 @@ def load_libcalib_calibration(cameras_json: Path, cam_ids: list[int]) -> list[Ca
     return cameras
 
 
+def _matrix4(value, name: str) -> list[list[float]]:
+    """接受展平的 16 项或 4x4 嵌套矩阵。"""
+    if isinstance(value, list) and len(value) == 16:
+        values = [float(x) for x in value]
+        return [values[i:i + 4] for i in range(0, 16, 4)]
+    if isinstance(value, list) and len(value) == 4 and all(
+        isinstance(row, list) and len(row) == 4 for row in value
+    ):
+        return [[float(x) for x in row] for row in value]
+    raise PipelineError(f"{name} 必须是展平的 16 项或 4x4 矩阵")
+
+
+def _pose_from_frame_matrix(entry: dict, cam_id: int) -> tuple:
+    """frames 标定的 w2c/c2w → COLMAP world-to-camera 位姿。"""
+    if entry.get("w2c") is not None:
+        w2c = _matrix4(entry["w2c"], f"相机 {cam_id} w2c")
+        rotation = [row[:3] for row in w2c[:3]]
+        translation = [w2c[i][3] for i in range(3)]
+    elif entry.get("c2w") is not None:
+        c2w = _matrix4(entry["c2w"], f"相机 {cam_id} c2w")
+        rotation_ctw = [row[:3] for row in c2w[:3]]
+        rotation = _mat_transpose(rotation_ctw)
+        center = [c2w[i][3] for i in range(3)]
+        translation = [-x for x in _mat_vec_mul(rotation, center)]
+    else:
+        raise PipelineError(f"相机 {cam_id} 缺少 w2c/c2w 位姿矩阵")
+    qw, qx, qy, qz = _quaternion_from_rotation_matrix(rotation)
+    return qw, qx, qy, qz, translation[0], translation[1], translation[2]
+
+
+def load_opencv_frames_calibration(calib_json: Path, cam_ids: list[int]) -> list[CameraCalib]:
+    """加载 ``{frames:[...]}`` OpenCV 标定。
+
+    每项通过 filename/camera_id 与输入的 camXXX 对齐，直接复用 w2c；不会按
+    JSON 数组顺序配对。两边完整且只有恒定编号偏移时自动修正偏移，避免字典序、
+    缺号或采集/标定编号规则不同导致外参套到错误相机。
+    """
+    import json
+
+    data = json.loads(Path(calib_json).read_text(encoding="utf-8"))
+    frames = data.get("frames") if isinstance(data, dict) else None
+    if not isinstance(frames, list) or not frames:
+        raise PipelineError("frames 标定 JSON 缺少非空顶层 frames 列表")
+
+    by_cam_id: dict[int, dict] = {}
+    for index, entry in enumerate(frames):
+        if not isinstance(entry, dict):
+            raise PipelineError(f"frames[{index}] 不是对象")
+        filename_id = parse_cam_id(str(entry.get("filename", "")))
+        explicit_id = entry.get("camera_id")
+        try:
+            explicit_id = int(explicit_id) if explicit_id is not None else None
+        except (TypeError, ValueError) as exc:
+            raise PipelineError(f"frames[{index}].camera_id 不是整数") from exc
+        if filename_id is not None and explicit_id is not None and filename_id != explicit_id:
+            raise PipelineError(
+                f"frames[{index}] 编号冲突: filename={entry.get('filename')}，"
+                f"camera_id={explicit_id}"
+            )
+        cam_id = filename_id if filename_id is not None else explicit_id
+        if cam_id is None:
+            raise PipelineError(f"frames[{index}] 无法解析相机编号")
+        if cam_id in by_cam_id:
+            raise PipelineError(f"frames 标定包含重复相机编号: {cam_id}")
+        by_cam_id[cam_id] = entry
+
+    input_ids = set(cam_ids)
+    calib_ids = set(by_cam_id)
+    ordered_input = sorted(input_ids)
+    ordered_calib = sorted(calib_ids)
+
+    # 某些采集系统用视频序号 cam_1..cam_N，而标定系统用设备号
+    # cam_2..cam_(N+1)。只有两边数量完全相同且排序后一一呈唯一恒定偏移时，
+    # 才自动应用该偏移；其他不完整情况仍严格按同号匹配，避免静默错配外参。
+    offsets = {calib_id - input_id
+               for input_id, calib_id in zip(ordered_input, ordered_calib)}
+    use_offset = len(ordered_input) == len(ordered_calib) and len(offsets) == 1
+    id_offset = next(iter(offsets)) if use_offset else 0
+    if use_offset:
+        entry_by_input = {
+            input_id: by_cam_id[input_id + id_offset] for input_id in ordered_input
+        }
+        matched_ids = ordered_input
+        if id_offset:
+            sign = "+" if id_offset > 0 else ""
+            print(
+                f"  ⚠️ 检测到标定编号整体偏移 {sign}{id_offset}，自动映射: "
+                f"输入 cam{ordered_input[0]:03d} → 标定 cam{ordered_input[0] + id_offset:03d}，"
+                f"共 {len(matched_ids)} 台"
+            )
+    else:
+        matched_ids = sorted(input_ids & calib_ids)
+        entry_by_input = {cam_id: by_cam_id[cam_id] for cam_id in matched_ids}
+        if not matched_ids:
+            raise PipelineError(
+                f"frames 标定与输入相机编号没有交集：输入={ordered_input[:8]}，"
+                f"标定={ordered_calib[:8]}"
+            )
+        missing = sorted(input_ids - calib_ids)
+        extra = sorted(calib_ids - input_ids)
+        if missing:
+            print(f"  ⚠️ {len(missing)} 台输入相机没有标定，已跳过: "
+                  f"{', '.join('cam%03d' % x for x in missing[:12])}"
+                  f"{' …' if len(missing) > 12 else ''}")
+        if extra:
+            print(f"  ⚠️ 标定文件中 {len(extra)} 台相机没有对应输入，已忽略: "
+                  f"{', '.join('cam%03d' % x for x in extra[:12])}"
+                  f"{' …' if len(extra) > 12 else ''}")
+
+    cameras: list[CameraCalib] = []
+    for cam_id in matched_ids:
+        entry = entry_by_input[cam_id]
+        intrinsic = entry.get("intrinsic")
+        if isinstance(intrinsic, list) and len(intrinsic) == 3 and all(
+            isinstance(row, list) and len(row) == 3 for row in intrinsic
+        ):
+            intrinsic = [x for row in intrinsic for x in row]
+        if not isinstance(intrinsic, list) or len(intrinsic) != 9:
+            raise PipelineError(f"相机 {cam_id} intrinsic 必须是 9 项或 3x3 矩阵")
+        image_size = entry.get("image_size")
+        if not isinstance(image_size, list) or len(image_size) != 2:
+            raise PipelineError(f"相机 {cam_id} image_size 必须是 [width, height]")
+
+        model = str(entry.get("camera_model", "OPENCV")).upper()
+        if model not in {"OPENCV", "FULL_OPENCV"}:
+            raise PipelineError(f"相机 {cam_id} 暂不支持 camera_model={model}")
+        dist_raw = entry.get("distortion", [])
+        if isinstance(dist_raw, dict):
+            dist = [dist_raw.get(name, 0.0) for name in
+                    ("k1", "k2", "p1", "p2", "k3", "k4", "k5", "k6",
+                     "s1", "s2", "s3", "s4")]
+        elif isinstance(dist_raw, list):
+            dist = dist_raw
+        else:
+            raise PipelineError(f"相机 {cam_id} distortion 必须是列表或对象")
+
+        cameras.append(CameraCalib(
+            cam_id=cam_id,
+            width=int(image_size[0]),
+            height=int(image_size[1]),
+            fx=float(intrinsic[0]),
+            fy=float(intrinsic[4]),
+            cx=float(intrinsic[2]),
+            cy=float(intrinsic[5]),
+            model="opencv",
+            pose=_pose_from_frame_matrix(entry, cam_id),
+            dist=[float(x) for x in dist],
+        ))
+    print(f"  已加载 frames/OpenCV 标定: {len(cameras)} 台相机")
+    return cameras
+
+
 # ---------------------------------------------------------------------------
 # 去畸变映射（两种模型统一成 map_x/map_y + 新内参）
 # ---------------------------------------------------------------------------
@@ -412,6 +565,41 @@ def build_undistort_map(calib: CameraCalib):
         k1, k2, p1, p2, k3 = (list(calib.dist) + [0.0] * 5)[:5]
         map_x, map_y, new_k = polynomial_build_map(
             w, h, calib.fx, calib.fy, calib.cx, calib.cy, k1, k2, k3, p1, p2)
+        return map_x, map_y, new_k, (w, h)
+
+    if calib.model == "opencv":
+        import cv2
+
+        camera_matrix = np.array([
+            [calib.fx, 0.0, calib.cx],
+            [0.0, calib.fy, calib.cy],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float64)
+        distortion = np.asarray(calib.dist or [0.0] * 5, dtype=np.float64)
+        new_matrix, _roi = cv2.getOptimalNewCameraMatrix(
+            camera_matrix, distortion, (w, h), alpha=0.0
+        )
+        # 下游 3DGS（含 FastGS）只用 fx/fy 推 FoV、假定主点位于图像中心，完全忽略
+        # cx/cy；COLMAP getOptimalNewCameraMatrix + ROI 裁剪会把主点留在非中心处，
+        # 导致每台相机渲染都有几十像素的平移，多视角互相打架、训练糊成一团。
+        # 这里强制主点居中，并保持整幅尺寸（不做 ROI 裁剪），与 rational/polynomial
+        # 两个分支的居中约定保持一致。
+        #
+        # 另外 getOptimalNewCameraMatrix 会分别拟合水平/垂直缩放，即使原始标定
+        # fx≈fy（方形像素）也会凭空造出 ~2% 的 fx≠fy 各向异性；3DGS 用 fx 推 FovX、
+        # fy 推 FovY，会把每帧纵向拉伸。取两者较小值作为统一焦距，恢复方形像素、
+        # 且不引入额外裁剪。
+        new_matrix = new_matrix.copy()
+        focal = min(new_matrix[0, 0], new_matrix[1, 1])
+        new_matrix[0, 0] = focal
+        new_matrix[1, 1] = focal
+        new_matrix[0, 2] = w / 2.0
+        new_matrix[1, 2] = h / 2.0
+        map_x, map_y = cv2.initUndistortRectifyMap(
+            camera_matrix, distortion, None, new_matrix, (w, h), cv2.CV_32FC1
+        )
+        new_k = (new_matrix[0, 0], new_matrix[1, 1],
+                 new_matrix[0, 2], new_matrix[1, 2])
         return map_x, map_y, new_k, (w, h)
 
     raise PipelineError(f"未知畸变模型: {calib.model}")

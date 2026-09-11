@@ -311,17 +311,18 @@ def run_multiframe_pipeline(script_path: Path, images_dir: Path, sparse_dir: Pat
     frame_point_counts = {}
     for frame_id in frame_ids:
         frame_images = frame_to_cams[frame_id]
-        if reference_cam_count and len(frame_images) != reference_cam_count:
-            print(f"⚠️  frame{frame_id:03d} 相机数 {len(frame_images)} 与参考模型 {reference_cam_count} 不一致，跳过")
-            continue
-        if ref_by_cam and set(frame_images.keys()) != set(ref_by_cam.keys()):
+        if ref_by_cam:
+            # 只需参考模型的相机是本帧相机的子集：缺相机才跳过；多出的相机（SfM 未注册）忽略。
             missing_in_frame = sorted(set(ref_by_cam.keys()) - set(frame_images.keys()))
-            missing_in_ref = sorted(set(frame_images.keys()) - set(ref_by_cam.keys()))
-            print(f"❌ frame{frame_id:03d} 相机编号与参考模型不一致，跳过")
             if missing_in_frame:
-                print(f"   当前帧缺少相机: {missing_in_frame}")
-            if missing_in_ref:
-                print(f"   参考模型缺少相机: {missing_in_ref}")
+                print(f"❌ frame{frame_id:03d} 缺少参考模型中的相机 {missing_in_frame}，跳过")
+                continue
+            extra = sorted(set(frame_images.keys()) - set(ref_by_cam.keys()))
+            if extra:
+                print(f"ℹ️  frame{frame_id:03d}: {len(extra)} 台相机不在参考模型中（SfM 未注册），本帧忽略这些相机")
+                frame_images = {cam_id: frame_images[cam_id] for cam_id in ref_by_cam.keys()}
+        elif reference_cam_count and len(frame_images) != reference_cam_count:
+            print(f"⚠️  frame{frame_id:03d} 相机数 {len(frame_images)} 与参考模型 {reference_cam_count} 不一致，跳过")
             continue
 
         # 清理旧版本脚本留下的逐帧输出目录，避免误以为本次仍在生成这些结果。

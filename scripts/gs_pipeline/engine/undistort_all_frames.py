@@ -190,8 +190,11 @@ def main():
             return True
         return False
     
-    # 自动扫描输入目录中所有 cam* 子目录
+    # 自动扫描输入目录中所有 cam* 子目录。无标定 SfM 可能只注册
+    # 其中一部分相机；未出现在 estimated_calib.json 中的相机应该被剔除，
+    # 而不是计为去畸变失败并中止整条流水线。
     tasks = []
+    skipped_cam_ids = []
     for cam_dir in sorted(input_dir.iterdir()):
         if not cam_dir.is_dir() or not cam_dir.name.startswith('cam'):
             continue
@@ -201,6 +204,10 @@ def main():
         except ValueError:
             continue
 
+        if cam_id not in camera_params:
+            skipped_cam_ids.append(cam_id)
+            continue
+
         # 获取所有图像文件
         image_files = sorted([f for f in cam_dir.iterdir()
                              if f.suffix.lower() in ['.png', '.jpg', '.jpeg']])
@@ -208,6 +215,14 @@ def main():
         for img_file in image_files:
             tasks.append((cam_id, img_file))
             total_count += 1
+
+    if skipped_cam_ids:
+        preview = ', '.join(f'cam{cam_id:03d}' for cam_id in skipped_cam_ids[:12])
+        suffix = ' …' if len(skipped_cam_ids) > 12 else ''
+        print(
+            f"⚠️  SfM 未注册 {len(skipped_cam_ids)} 台相机，已跳过: "
+            f"{preview}{suffix}"
+        )
     
     print(f"📊 共需处理 {total_count} 张图像")
     if total_count == 0:
@@ -256,7 +271,7 @@ def main():
     print(f"📄 相机参数: {cameras_file}")
     
     if success_count == total_count:
-        print("\n🎉 所有帧去畸变处理完成！")
+        print("\n🎉 已注册相机的所有帧去畸变处理完成！")
         return 0
     else:
         print(f"\n⚠️  部分帧处理失败: {total_count - success_count} 张")

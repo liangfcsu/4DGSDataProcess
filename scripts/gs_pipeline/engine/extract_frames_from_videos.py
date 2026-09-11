@@ -13,6 +13,16 @@ from tqdm import tqdm
 import re
 import sys
 
+VIDEO_SUFFIXES = {'.mp4', '.mov', '.avi', '.mkv'}
+
+
+def parse_video_cam_id(stem):
+    """兼容 cam001、cam_1、cam-001 和纯数字视频名。"""
+    match = re.fullmatch(r'cam[_-]?0*(\d+)', stem, re.IGNORECASE)
+    if not match:
+        match = re.fullmatch(r'0*(\d+)', stem)
+    return int(match.group(1)) if match else None
+
 
 def _existing_frame_count(output_dir, cam_num):
     """检查已有输出是否从frame001连续到最后一帧。"""
@@ -372,11 +382,14 @@ def main():
     processed_videos = 0
     failed_videos = []
     
-    # 自动扫描视频目录中的所有.mp4文件
-    video_files = sorted(video_dir.glob('*.mp4'))
+    # 自动扫描视频目录，与统一入口支持的扩展名保持一致。
+    video_files = sorted(
+        path for path in video_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES
+    )
     
     if not video_files:
-        print(f"❌ 视频目录中找不到任何 .mp4 文件: {video_dir}")
+        print(f"❌ 视频目录中找不到可用视频文件: {video_dir}")
         return
     
     print(f"📂 在目录中找到 {len(video_files)} 个视频文件")
@@ -385,18 +398,10 @@ def main():
     # 遍历所有相机视频
     for video_path in video_files:
         video_filename = video_path.name
-        
-        # 尝试从文件名中提取相机编号 (支持 cam00.mp4, cam001.mp4, 001.mp4 等格式)
-        # 优先匹配 camXX 格式，其次匹配纯数字格式
-        match = re.match(r'cam0*(\d+)', video_filename)
-        if not match:
-            match = re.match(r'0*(\d+)', video_filename)
-        
-        if not match:
+        cam_num = parse_video_cam_id(video_path.stem)
+        if cam_num is None:
             print(f"⚠️  跳过: {video_filename} (无法提取相机编号)")
             continue
-        
-        cam_num = int(match.group(1))
         
         # 根据 --start-cam 和 --end-cam 筛选
         if args.start_cam is not None and cam_num < args.start_cam:
