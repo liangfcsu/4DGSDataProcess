@@ -122,6 +122,10 @@ class Observation:
     reprojection_error: float = float("nan")
     is_inlier: bool = False
     source: str = "temporal"
+    association_score: float = 0.0
+    # -1: no cycle evidence, 0: inconsistent, 1: consistent.
+    cycle_consistency: int = -1
+    switch_score: float = 0.0
 
 
 @dataclass(slots=True)
@@ -137,6 +141,34 @@ class TrackSample:
     geometry_confidence: float
     sparse_support_distance: float = float("nan")
     state: TrackState = TrackState.NEW
+    # ``xyz`` is the immutable result of the first per-frame triangulation.
+    # Pose refinement and motion optimization are deliberately stored apart.
+    pose_refined_xyz: np.ndarray = field(
+        default_factory=lambda: np.full(3, np.nan, dtype=np.float64)
+    )
+    optimized_xyz: np.ndarray = field(
+        default_factory=lambda: np.full(3, np.nan, dtype=np.float64)
+    )
+    covariance: np.ndarray = field(
+        default_factory=lambda: np.full((3, 3), np.nan, dtype=np.float64)
+    )
+    position_std: float = float("nan")
+    motion_significance: float = float("nan")
+    pose_refined: bool = False
+
+    @property
+    def measurement_xyz(self) -> np.ndarray:
+        """Best geometry-only measurement, before any motion prior."""
+        if self.pose_refined and np.all(np.isfinite(self.pose_refined_xyz)):
+            return self.pose_refined_xyz
+        return self.xyz
+
+    @property
+    def output_xyz(self) -> np.ndarray:
+        """Coordinate intended for exports and downstream reconstruction."""
+        if np.all(np.isfinite(self.optimized_xyz)):
+            return self.optimized_xyz
+        return self.measurement_xyz
 
 
 @dataclass(slots=True)
@@ -157,6 +189,20 @@ class Track:
     mean_confidence: float = 0.0
     median_reprojection_error: float = float("nan")
     quality: str = "low"
+    canonical_xyz: np.ndarray = field(
+        default_factory=lambda: np.full(3, np.nan, dtype=np.float64)
+    )
+    canonical_covariance: np.ndarray = field(
+        default_factory=lambda: np.full((3, 3), np.nan, dtype=np.float64)
+    )
+    static_model_score: float = float("inf")
+    dynamic_model_score: float = float("inf")
+    model_score_margin: float = 0.0
+    static_confidence: float = 0.0
+    motion_group_id: int = -1
+    identity_parent_id: int = -1
+    split_frame: int = -1
+    identity_switch_count: int = 0
 
 
 @dataclass(slots=True)

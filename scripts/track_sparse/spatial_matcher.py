@@ -112,7 +112,8 @@ class HlocFeatureMatcher:
             scores = np.asarray(group["scores"], dtype=np.float32)
         return keypoints, scores
 
-    def matches(self, name_a: str, name_b: str) -> PairMatches:
+    def match_links(self, name_a: str, name_b: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Read only feature IDs and scores, avoiding keypoint I/O for graph building."""
         reverse = False
         direct, flipped = pair_key(name_a, name_b), pair_key(name_b, name_a)
         with h5py.File(self.matches_path, "r", libver="latest") as handle:
@@ -122,21 +123,19 @@ class HlocFeatureMatcher:
                 group = handle[flipped]
                 reverse = True
             else:
-                return PairMatches(
-                    np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32),
-                    np.empty((0, 2), dtype=np.float32), np.empty((0, 2), dtype=np.float32),
-                    np.empty(0, dtype=np.float32),
-                )
+                empty_i = np.empty(0, dtype=np.int32)
+                return empty_i, empty_i.copy(), np.empty(0, dtype=np.float32)
             matches0 = np.asarray(group["matches0"], dtype=np.int32)
-            scores0 = np.asarray(group.get("matching_scores0", np.ones_like(matches0)), dtype=np.float32)
+            scores0 = np.asarray(
+                group.get("matching_scores0", np.ones_like(matches0)), dtype=np.float32
+            )
         source_ids = np.flatnonzero(matches0 >= 0).astype(np.int32)
         target_ids = matches0[source_ids].astype(np.int32)
         scores = scores0[source_ids]
-        if reverse:
-            ids_a, ids_b = target_ids, source_ids
-        else:
-            ids_a, ids_b = source_ids, target_ids
+        return (target_ids, source_ids, scores) if reverse else (source_ids, target_ids, scores)
+
+    def matches(self, name_a: str, name_b: str) -> PairMatches:
+        ids_a, ids_b, scores = self.match_links(name_a, name_b)
         keypoints_a, _ = self.features(name_a)
         keypoints_b, _ = self.features(name_b)
         return PairMatches(ids_a, ids_b, keypoints_a[ids_a], keypoints_b[ids_b], scores)
-

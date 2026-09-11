@@ -100,7 +100,13 @@ def write_trajectory_ply(tracks: dict[int, Track], path: Path) -> None:
                 continue
             current = len(vertices)
             rgb = track.color_rgb
-            vertices.append((sample.xyz[0], sample.xyz[1], sample.xyz[2], rgb[0], rgb[1], rgb[2], track.track_id, frame_id))
+            xyz = sample.output_xyz
+            motion_code = {"unknown": 0, "static": 1, "dynamic": 2}[track.motion_class.value]
+            vertices.append((
+                xyz[0], xyz[1], xyz[2], rgb[0], rgb[1], rgb[2],
+                track.track_id, frame_id, motion_code, track.motion_group_id,
+                sample.position_std,
+            ))
             if previous_index is not None and previous_frame is not None and frame_id == previous_frame + 1:
                 edges.append((previous_index, current))
             previous_index, previous_frame = current, frame_id
@@ -111,6 +117,8 @@ def write_trajectory_ply(tracks: dict[int, Track], path: Path) -> None:
         handle.write("property float x\nproperty float y\nproperty float z\n")
         handle.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
         handle.write("property uint track_id\nproperty int frame_id\n")
+        handle.write("property uchar motion_class\nproperty int motion_group_id\n")
+        handle.write("property float position_std\n")
         handle.write(f"element edge {len(edges)}\n")
         handle.write("property int vertex1\nproperty int vertex2\nend_header\n")
         for vertex in vertices:

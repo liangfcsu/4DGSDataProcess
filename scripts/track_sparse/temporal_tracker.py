@@ -41,10 +41,12 @@ class TemporalTracker:
         if source is None or target is None:
             links: dict[int, tuple[int, float]] = {}
         else:
-            matches = self.matcher.matches(source.relative_name, target.relative_name)
+            feature_ids_a, feature_ids_b, scores = self.matcher.match_links(
+                source.relative_name, target.relative_name
+            )
             links = {
                 int(first): (int(second), float(score))
-                for first, second, score in zip(matches.feature_ids_a, matches.feature_ids_b, matches.scores)
+                for first, second, score in zip(feature_ids_a, feature_ids_b, scores)
                 if float(score) >= self.min_score
             }
         self._cache[key] = links
@@ -52,6 +54,12 @@ class TemporalTracker:
         while len(self._cache) > self.cache_size:
             self._cache.popitem(last=False)
         return links
+
+    def link_feature(
+        self, cam_id: int, source_frame: int, target_frame: int, feature_id: int
+    ) -> tuple[int, float] | None:
+        """Expose one cached temporal graph edge for cycle-consistency checks."""
+        return self._links(cam_id, source_frame, target_frame).get(int(feature_id))
 
     def propagate(
         self,
@@ -88,5 +96,5 @@ class TemporalTracker:
             tracker_confidence=float(score * float(feature_scores[target_feature])),
             spatial_confidence=0.0,
             source="temporal" if target_frame - source.frame_id == 1 else "reconnect",
+            association_score=float(score),
         )
-

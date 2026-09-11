@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import logging
 
 import numpy as np
 
 from .geometry import robust_triangulate
+from .observation_graph import ObservationGraphAssociator
 from .schema import Observation, SpatialGroup, Track, TrackSample, TrackState
 from .temporal_tracker import TemporalTracker
+
+
+LOGGER = logging.getLogger("track_sparse")
 
 
 class TrackManager:
@@ -21,62 +26,18 @@ class TrackManager:
         self.tracks: dict[int, Track] = {}
         self.next_track_id = 1
         self.stats = defaultdict(int)
+        self.associator = ObservationGraphAssociator(temporal, sorted(cameras), config)
 
     def _propagate_to_frame(self, frame_id: int) -> None:
-        offsets = sorted({int(value) for value in self.config["temporal"]["offsets"]})
-        proposed: list[tuple[float, Track, Observation]] = []
-        for track in list(self.tracks.values()):
-            if track.state == TrackState.ENDED or frame_id <= track.birth_frame:
+        observations, stats = self.associator.associate(self.tracks, frame_id)
+        for key, value in stats.items():
+            self.stats[key] += value
+        self.stats["temporal_conflicts"] += stats["association_conflicts"]
+        for observation in observations:
+            track = self.tracks.get(observation.track_id)
+            if track is None:
                 continue
-            for cam_id in self.cameras:
-                if (frame_id, cam_id) in track.observations:
-                    continue
-                candidates: list[Observation] = []
-                for offset in offsets:
-                    source = track.observations.get((frame_id - offset, cam_id))
-                    if source is None or not source.visible:
-                        continue
-                    candidate = self.temporal.propagate(track.track_id, source, frame_id)
-                    if candidate is not None:
-                        # Prefer high confidence and then the shorter temporal edge.
-                        candidate.tracker_confidence *= 1.0 / (1.0 + 0.1 * (offset - 1))
-                        candidates.append(candidate)
-                if candidates:
-                    best = max(candidates, key=lambda item: (item.tracker_confidence, item.source == "temporal"))
-                    proposed.append((best.tracker_confidence, track, best))
-        # Resolve offset-based collisions globally: a target feature belongs to one Track ID.
-        reserved_features: set[tuple[int, int]] = set()
-        reserved_track_cameras: set[tuple[int, int]] = set()
-        for _, track, observation in sorted(proposed, key=lambda item: -item[0]):
-            feature_key = (observation.cam_id, observation.feature_id)
-            track_camera_key = (track.track_id, observation.cam_id)
-            if feature_key in reserved_features or track_camera_key in reserved_track_cameras:
-                self.stats["temporal_conflicts"] += 1
-                continue
-            reserved_features.add(feature_key)
-            reserved_track_cameras.add(track_camera_key)
             track.observations[(frame_id, observation.cam_id)] = observation
-
-    def _duplicate_candidate(self, group: SpatialGroup, consumed: set[int]) -> Track | None:
-        radius = float(self.config["spawn"]["duplicate_radius_px"])
-        min_views = int(self.config["spawn"]["min_duplicate_views"])
-        candidates: list[tuple[int, float, int, Track]] = []
-        for track in self.tracks.values():
-            if track.track_id in consumed or track.state == TrackState.ENDED:
-                continue
-            agreements, exact, distances = 0, 0, []
-            for cam_id, seed in group.observations.items():
-                existing = track.observations.get((group.frame_id, cam_id))
-                if existing is None:
-                    continue
-                distance = float(np.linalg.norm(np.array([existing.u, existing.v]) - seed.uv))
-                if existing.feature_id == seed.feature_id or distance <= radius:
-                    agreements += 1
-                    exact += int(existing.feature_id == seed.feature_id)
-                    distances.append(distance)
-            if agreements >= min_views:
-                candidates.append((agreements, exact, -float(np.mean(distances)), track))
-        return max(candidates, key=lambda item: item[:3])[3] if candidates else None
 
     @staticmethod
     def _seed_observation(track_id: int, seed, source: str = "seed") -> Observation:
@@ -103,18 +64,76 @@ class TrackManager:
 
     def _spawn_and_merge(self, groups: list[SpatialGroup]) -> None:
         consumed: set[int] = set()
+        if not groups:
+            return
+        frame_id = groups[0].frame_id
+        feature_owner: dict[tuple[int, int], int] = {}
+        radius = float(self.config["spawn"]["duplicate_radius_px"])
+        cell_size = max(radius, 1.0e-6)
+        spatial_grid: dict[tuple[int, int, int], list[tuple[float, float, int]]] = defaultdict(list)
+
+        def insert(cam_id: int, u: float, v: float, track_id: int) -> None:
+            cell = (cam_id, int(np.floor(u / cell_size)), int(np.floor(v / cell_size)))
+            spatial_grid[cell].append((u, v, track_id))
+
+        def nearest(cam_id: int, uv: np.ndarray) -> tuple[int, float] | None:
+            center_x = int(np.floor(float(uv[0]) / cell_size))
+            center_y = int(np.floor(float(uv[1]) / cell_size))
+            best: tuple[int, float] | None = None
+            for offset_x in (-1, 0, 1):
+                for offset_y in (-1, 0, 1):
+                    for u, v, track_id in spatial_grid.get(
+                        (cam_id, center_x + offset_x, center_y + offset_y), []
+                    ):
+                        distance = float(np.hypot(float(uv[0]) - u, float(uv[1]) - v))
+                        if distance <= radius and (best is None or distance < best[1]):
+                            best = (track_id, distance)
+            return best
+
+        for track in self.tracks.values():
+            if track.state == TrackState.ENDED:
+                continue
+            for cam_id in self.cameras:
+                observation = track.observations.get((frame_id, cam_id))
+                if observation is None:
+                    continue
+                feature_owner[(cam_id, observation.feature_id)] = track.track_id
+                insert(cam_id, observation.u, observation.v, track.track_id)
+        min_views = int(self.config["spawn"]["min_duplicate_views"])
         for group in sorted(groups, key=lambda item: -item.geometry_confidence):
-            track = self._duplicate_candidate(group, consumed)
+            votes: dict[int, list[tuple[bool, float]]] = defaultdict(list)
+            for cam_id, seed in group.observations.items():
+                exact_owner = feature_owner.get((cam_id, seed.feature_id))
+                if exact_owner is not None:
+                    votes[exact_owner].append((True, 0.0))
+                    continue
+                proximity = nearest(cam_id, seed.uv)
+                if proximity is not None:
+                    track_id, distance = proximity
+                    votes[track_id].append((False, distance))
+            candidates = []
+            for track_id, agreements in votes.items():
+                track = self.tracks.get(track_id)
+                if (
+                    track is None or track_id in consumed or track.state == TrackState.ENDED
+                    or len(agreements) < min_views
+                ):
+                    continue
+                exact = sum(value[0] for value in agreements)
+                mean_distance = float(np.mean([value[1] for value in agreements]))
+                candidates.append((len(agreements), exact, -mean_distance, track))
+            track = max(candidates, key=lambda item: item[:3])[3] if candidates else None
             if track is not None:
                 self._attach_group(track, group, "reconnect" if track.state in {TrackState.LOST, TrackState.OCCLUDED} else "seed")
                 consumed.add(track.track_id)
                 self.stats["duplicate_groups_suppressed"] += 1
+                for cam_id, seed in group.observations.items():
+                    feature_owner[(cam_id, seed.feature_id)] = track.track_id
+                    insert(cam_id, float(seed.uv[0]), float(seed.uv[1]), track.track_id)
                 continue
             occupied = {
-                (observation.cam_id, observation.feature_id)
-                for existing_track in self.tracks.values()
-                for (existing_frame, _), observation in existing_track.observations.items()
-                if existing_frame == group.frame_id
+                key for key in ((cam_id, seed.feature_id) for cam_id, seed in group.observations.items())
+                if key in feature_owner
             }
             available = {
                 cam_id: seed for cam_id, seed in group.observations.items()
@@ -130,6 +149,9 @@ class TrackManager:
             self.tracks[track_id] = track
             consumed.add(track_id)
             self.stats["new_tracks"] += 1
+            for cam_id, seed in available.items():
+                feature_owner[(cam_id, seed.feature_id)] = track_id
+                insert(cam_id, float(seed.uv[0]), float(seed.uv[1]), track_id)
 
     def _triangulate_track(self, track: Track, frame_id: int) -> TrackSample:
         observations = sorted(
@@ -203,7 +225,8 @@ class TrackManager:
         track.samples[frame_id] = sample
 
     def run(self, groups_by_frame: dict[int, list[SpatialGroup]]) -> dict[int, Track]:
-        for frame_id in self.frames:
+        interval = max(1, int(self.config["track"].get("log_interval", 10)))
+        for frame_index, frame_id in enumerate(self.frames):
             self._propagate_to_frame(frame_id)
             self._spawn_and_merge(groups_by_frame.get(frame_id, []))
             for track in list(self.tracks.values()):
@@ -211,4 +234,10 @@ class TrackManager:
                     continue
                 sample = self._triangulate_track(track, frame_id)
                 self._update_state(track, sample, frame_id)
+            if frame_index == 0 or (frame_index + 1) % interval == 0 or frame_index + 1 == len(self.frames):
+                active = sum(track.state != TrackState.ENDED for track in self.tracks.values())
+                LOGGER.info(
+                    "轨迹构建 %d/%d (frame=%d): total=%d, live=%d",
+                    frame_index + 1, len(self.frames), frame_id, len(self.tracks), active,
+                )
         return self.tracks

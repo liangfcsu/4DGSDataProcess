@@ -1,4 +1,4 @@
-schema_version: "1.0.0"
+schema_version: "2.0.0"
 
 data:
   image_size_tolerance_px: 1
@@ -40,6 +40,15 @@ temporal:
   min_score: 0.20
   min_camera_votes: 2
 
+# Temporal edges entering the same frame are solved together. A target feature
+# can belong to only one Track ID, and one camera is not enough to move a 3D ID.
+association:
+  offset_penalty: 0.10
+  reject_cycle_inconsistent: true
+  cycle_inconsistent_weight: 0.25
+  cycle_consistent_bonus: 1.05
+  allow_single_camera_bridge: false
+
 triangulation:
   min_views: 2
   min_angle_deg: 1.0
@@ -56,11 +65,83 @@ track:
   tentative_frames: 3
   max_occlusion_gap: 5
   max_lost_gap: 15
+  log_interval: 10
 
-classification:
+# Covariance turns a raw displacement into a geometry-aware significance.
+uncertainty:
+  min_pixel_sigma: 0.5
+  damping: 1.0e-9
+  max_condition_number: 1.0e12
+
+# A track is split only when an abrupt 3D jump is also supported by acceleration,
+# weak association or failed temporal cycle consistency.
+identity_validation:
+  enabled: true
+  min_track_frames: 5
+  max_checked_gap: 2
+  max_step_ratio: 0.03
+  max_acceleration_ratio: 0.02
+  mad_multiplier: 8.0
+  min_jump_sigma: 6.0
+  cycle_bad_fraction: 0.50
+  min_association_score: 0.25
+  cycle_evidence_weight: 1.0
+  weak_association_weight: 0.5
+  split_score: 2.0
+  min_segment_frames: 3
+
+# Static and dynamic explanations compete using all accepted reprojection
+# evidence. Static samples share exactly one canonical world point.
+motion_models:
   min_valid_frames: 5
-  static_baseline_ratio: 0.002
-  dynamic_threshold_multiplier: 3.0
+  max_static_observations: 512
+  static_huber_px: 2.0
+  static_refine_iterations: 6
+  score_epsilon: 1.0e-6
+  dynamic_dof_per_frame: 0.50
+  selection_margin: 5.0
+  static_max_reprojection_px: 2.5
+  static_max_motion_sigma: 8.0
+  dynamic_min_motion_sigma: 4.0
+
+# Only dynamic tracks receive a temporal prior; the raw and pose-refined
+# triangulations remain in separate fields for auditing.
+dynamic_optimization:
+  min_position_std_ratio: 1.0e-5
+  temporal_sigma_ratio: 0.005
+  velocity_weight: 0.0
+  acceleration_weight: 0.20
+  max_smooth_gap: 2
+  max_correction_sigma: 2.5
+
+# Per-frame corrections are deliberately small and are estimated only from
+# high-confidence tracks currently explained by the static model.
+pose_refinement:
+  enabled: true
+  min_static_confidence: 0.70
+  min_track_frames: 10
+  min_points: 20
+  ransac_iterations: 100
+  max_reprojection_error_px: 2.5
+  ransac_confidence: 0.999
+  max_rotation_deg: 0.25
+  max_translation_ratio: 0.002
+  blend: 0.50
+  point_refine_iterations: 3
+
+# Dynamic tracks are grouped by coherent local 3D motion, not by semantic
+# labels. Articulated objects may naturally produce several local groups.
+motion_groups:
+  enabled: true
+  min_track_frames: 8
+  search_radius_ratio: 0.10
+  motion_residual_ratio: 0.005
+  min_overlap_frames: 5
+  max_neighbors: 16
+  min_group_size: 4
+  rigid_fit_min_points: 4
+  max_rigid_residual_ratio: 0.005
+  rigid_blend: 0.15
 
 export:
   npz: true

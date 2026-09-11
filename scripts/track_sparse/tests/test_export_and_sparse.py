@@ -29,8 +29,12 @@ class ExportAndSparseTests(unittest.TestCase):
                 self.assertEqual(data["xyz"].shape, (0, 3))
             write_tracks_h5({}, {0: _camera()}, root / "tracks.h5")
             with h5py.File(root / "tracks.h5", "r") as handle:
+                self.assertEqual(handle.attrs["schema_version"], "2.0.0")
                 self.assertEqual(handle["observations/uv"].shape, (0, 2))
                 self.assertEqual(handle["samples3d/xyz"].shape, (0, 3))
+                self.assertEqual(handle["samples3d/raw_xyz"].shape, (0, 3))
+                self.assertEqual(handle["samples3d/covariance"].shape, (0, 3, 3))
+                self.assertEqual(handle["camera_corrections/R_w2c"].shape, (0, 3, 3))
 
     def test_sparse_cloud_support_distance(self):
         with tempfile.TemporaryDirectory() as directory:

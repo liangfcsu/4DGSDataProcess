@@ -62,6 +62,15 @@ def validate_config(config: dict[str, Any]) -> None:
         "triangulation.min_views": config["triangulation"]["min_views"],
         "triangulation.max_reprojection_error_px": config["triangulation"]["max_reprojection_error_px"],
         "track.max_lost_gap": config["track"]["max_lost_gap"],
+        "temporal.min_camera_votes": config["temporal"]["min_camera_votes"],
+        "uncertainty.min_pixel_sigma": config["uncertainty"]["min_pixel_sigma"],
+        "identity_validation.min_track_frames": config["identity_validation"]["min_track_frames"],
+        "identity_validation.min_segment_frames": config["identity_validation"]["min_segment_frames"],
+        "motion_models.min_valid_frames": config["motion_models"]["min_valid_frames"],
+        "motion_models.max_static_observations": config["motion_models"]["max_static_observations"],
+        "pose_refinement.min_points": config["pose_refinement"]["min_points"],
+        "motion_groups.min_group_size": config["motion_groups"]["min_group_size"],
+        "motion_groups.rigid_fit_min_points": config["motion_groups"]["rigid_fit_min_points"],
     }
     invalid = [name for name, value in positive.items() if float(value) <= 0]
     if invalid:
@@ -75,3 +84,15 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError("temporal.offsets 必须包含正整数")
     if config["temporal"].get("tracker") != "superglue":
         raise ConfigError("当前内置时间跟踪后端仅支持 temporal.tracker=superglue")
+    fractions = {
+        "association.cycle_inconsistent_weight": config["association"]["cycle_inconsistent_weight"],
+        "identity_validation.cycle_bad_fraction": config["identity_validation"]["cycle_bad_fraction"],
+        "pose_refinement.min_static_confidence": config["pose_refinement"]["min_static_confidence"],
+        "pose_refinement.blend": config["pose_refinement"]["blend"],
+        "motion_groups.rigid_blend": config["motion_groups"]["rigid_blend"],
+    }
+    invalid_fractions = [name for name, value in fractions.items() if not 0.0 <= float(value) <= 1.0]
+    if invalid_fractions:
+        raise ConfigError(f"以下配置必须在 [0, 1] 内: {', '.join(invalid_fractions)}")
+    if int(config["motion_groups"]["min_group_size"]) < int(config["motion_groups"]["rigid_fit_min_points"]):
+        raise ConfigError("motion_groups.min_group_size 不能小于 rigid_fit_min_points")

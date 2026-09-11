@@ -11,7 +11,16 @@
 
 ## 0. 当前实现与快速开始
 
-当前实现遵循本文与 `稀疏点云轨迹系统_实现指导.md` 的核心原则：使用 SuperPoint/SuperGlue 建立同帧跨相机空间边和同相机跨帧时间边，为二维 Observation 分配稳定的全局 Track ID，然后在每一帧用当前可见的多视角观测重新做鲁棒三角化。逐帧 `persparse` 只参与支持距离和置信度计算，绝不传播身份。
+当前 schema v2 使用 SuperPoint/SuperGlue 建立同帧跨相机空间边和同相机跨帧时间边，为二维 Observation 分配稳定的全局 Track ID，然后在每一帧用当前可见的多视角观测重新做鲁棒三角化。逐帧 `persparse` 只参与支持距离和置信度计算，绝不传播身份。
+
+三角化之后按以下六层分别优化，代码没有堆在入口脚本中：
+
+1. `observation_graph.py`：联合求解目标特征唯一占用、每轨每相机唯一、跨相机最少投票和时间环一致性。
+2. `uncertainty.py`：由投影 Jacobian、相机基线和重投影误差估计每个 3D 样本的协方差。
+3. `identity_validation.py`：结合 3D 跳变显著性、加速度、弱匹配和环不一致检测 ID switch，并切断污染轨迹。
+4. `motion_models.py`：让“一个固定世界点”和“逐帧运动点”两个模型竞争；静态输出严格共享一个 `canonical_xyz`，动态输出只做受协方差约束的平滑。
+5. `pose_refinement.py`：仅用高置信静态轨迹估计很小的逐帧相机位姿修正，再重新优化逐帧三角化位置。
+6. `motion_groups.py`：不依赖“只有人在动”的先验，按局部刚性运动将动态轨迹分组并拟合每帧 SE(3)。`trajectory_optimizer.py` 只负责按依赖顺序编排这些模块。
 
 已实现：
 
@@ -21,8 +30,8 @@
 - 复用仓库内置 HLOC SuperPoint/SuperGlue 代码和权重，模型输出封装在 adapter 后面。
 - 空间匹配置信度 + Sampson 误差过滤、同相机冲突受限的多视角组件合并。
 - 两视角 RANSAC 候选、正深度、视差角、逐视角重投影剔除及 SciPy robust least-squares refinement。
-- 相邻帧和短跨度时间匹配、目标 feature 唯一占用、周期出生、重复抑制和严格短时重连。
-- `new/tentative/active/occluded/lost/ended` 生命周期以及 `static/dynamic/unknown` 分类。
+- 相邻帧和短跨度时间匹配、带跨相机投票约束的全局观测图分配、周期出生、重复抑制和严格短时重连。
+- `new/tentative/active/occluded/lost/ended` 生命周期、身份跳变切分以及带不确定性的 `static/dynamic/unknown` 竞争模型。
 - `tracks.h5`、逐帧 NPZ/PLY、FreeTimeGS 适配 NPZ、2D overlay、3D trajectory PLY 和统计 JSON。
 - 输入/配置指纹、模型缓存复用、`--resume`、`--overwrite`、`--dry-run` 和阶段运行。
 
@@ -44,7 +53,7 @@ python3 scripts/track_sparse/run.py \
 ```
 
 `configs/flame_steak.yaml` 集中保存相机图、特征、匹配、出生、时间跟踪、三角化、
-生命周期、分类和导出参数。输入输出路径、帧范围、GPU 及断点模式属于运行控制，
+观测图、不确定性、身份验证、动静模型、位姿细化、运动分组和导出参数。输入输出路径、帧范围、GPU 及断点模式属于运行控制，
 继续由 CLI 指定。命令行同名算法参数仍可用于临时覆盖 YAML，但正式处理建议只修改
 该配置文件，以保证 `manifest.json` 中记录的参数可复现。
 
@@ -143,6 +152,20 @@ python3 scripts/track_sparse/run.py \
 `--resume` 同时校验原视频元数据、标定来源、抽帧参数、去畸变参数以及轨迹配置。
 参数或输入发生变化时会拒绝混用旧缓存；确认要重算时使用 `--overwrite`。
 
+从 schema v1 切到 v2 时配置指纹一定变化。若要保留已经完成的抽帧、标定和去畸变，
+可直接把这些产物作为显式输入，只重算轨迹层：
+
+```bash
+/opt/4dgs-player/env/bin/python3.11 scripts/track_sparse/run.py \
+  --images-dir outputs/flame_steak_tracks/preprocess/undistorted \
+  --sparse-dir outputs/flame_steak_tracks/preprocess/calibration/reference_sparse/0 \
+  --output outputs/flame_steak_tracks \
+  --config scripts/track_sparse/configs/flame_steak.yaml \
+  --start-frame 1 --end-frame 100 --gpu 0 --overwrite
+```
+
+该命令会保留 `preprocess/`，但会清理并重建轨迹层的 feature/match 缓存和导出。
+
 `--stages` 会运行到所选最晚阶段，并自动补齐它之前的依赖。例如 `--stages prepare,camera_graph` 不加载模型；`--stages spawn` 会生成特征和空间匹配；完整输出使用默认的 `all`。若输入或配置指纹发生变化，`--resume` 会拒绝旧缓存并提示换输出目录或显式 `--overwrite`。
 
 ### 0.4 输出
@@ -168,11 +191,15 @@ python3 scripts/track_sparse/run.py \
 │   └── frameXXX_track_points.ply
 └── debug/
     ├── metrics.json
+    ├── optimization_metrics.json
+    ├── pose_corrections.json
+    ├── identity_switches.json
+    ├── motion_groups.json
     ├── trajectories.ply
     └── overlays/camXXX_frameYYY.jpg
 ```
 
-`tracks.h5/observations` 按 `(track_id, frame_id, cam_id)` 排序；`samples3d` 按 `(track_id, frame_id)` 排序。无可靠双视角几何时会保留已有 2D Observation，但 `valid_3d=false`，不会插值伪装成测量值。
+`tracks.h5/observations` 按 `(track_id, frame_id, cam_id)` 排序；`samples3d` 按 `(track_id, frame_id)` 排序。schema v2 中 `samples3d/xyz` 是下游应使用的最终坐标，`raw_xyz` 是不可改写的首次三角化，`pose_refined_xyz` 和 `optimized_xyz` 分别记录位姿修正结果与运动模型结果。无可靠双视角几何时仍会保留 2D Observation，但 `valid_3d=false`，不会插值伪装成测量值。
 
 ### 0.5 测试
 
@@ -360,6 +387,9 @@ spatial_confidence: float32    # 出生/重连时有值
 reprojection_error: float32    # 三角化后回填
 is_inlier: bool
 source: seed | temporal | reconnect
+association_score: float32
+cycle_consistency: -1 | 0 | 1   # 未知 / 失败 / 通过
+switch_score: float32
 ```
 
 ### 5.3 TrackSample
@@ -367,7 +397,12 @@ source: seed | temporal | reconnect
 唯一键为 `(track_id, frame_id)`：
 
 ```text
-x, y, z: float32
+xyz: float32[3]                 # 下游使用的最终坐标
+raw_xyz: float32[3]             # 首次逐帧三角化，不覆盖
+pose_refined_xyz: float32[3]
+optimized_xyz: float32[3]
+covariance: float32[3,3]
+position_std, motion_significance: float32
 valid_3d: bool
 num_visible_views: int16
 num_inlier_views: int16
@@ -387,6 +422,10 @@ class: static | dynamic | unknown
 valid_frame_count, longest_valid_run
 mean_confidence, median_reprojection_error
 color_rgb                         # 从可靠观测鲁棒统计
+canonical_xyz, static_confidence
+static_model_score, dynamic_model_score
+motion_group_id
+identity_parent_id, split_frame, identity_switch_count
 ```
 
 全局 `track_id` 使用单调递增 int64，一旦分配永不复用。轨迹暂时遮挡后恢复，仍使用原 ID；无法可靠证明是同一点时宁愿创建新 ID，也不要错误合并。
@@ -506,20 +545,20 @@ lost   --超过 max_gap 未恢复--> ended
 - 重连至少要求两个视角几何一致，或一个视角的强时间证据加另一个视角确认。
 - 离线导出时可另存 `xyz_smoothed`/`xyz_interpolated`，但必须和原始 `xyz`、`valid_3d` 分开，并记录使用方法。
 
-### 阶段 H：静态/动态分类
+### 阶段 H：身份验证、静动态竞争与轨迹优化
 
 分类应在完成几何过滤之后进行。不要直接以相邻帧 3D 差分大于某固定世界单位作为唯一规则，因为标定尺度和三角化噪声会影响结果。
 
-推荐：
+当前实现顺序如下：
 
-1. 仅使用有效且高置信的 3D 样本。
-2. 用中位数位置拟合静态模型，计算位置残差的 median/MAD。
-3. 结合该 Track 的重投影噪声、视差角与时间跨度估计允许的 3D 抖动。
-4. 足够长且残差稳定低于噪声阈值标为 `static`。
-5. 存在连续、显著且超过噪声的运动标为 `dynamic`。
-6. 样本不足或证据冲突标为 `unknown`，不要强分。
+1. 根据多视角投影 Jacobian 计算每个三角化点的协方差，避免用固定世界单位判断运动。
+2. 在动静分类前检测身份跳变；只有显著 3D 跳变同时得到加速度、弱匹配或时间环失败支持时才切轨迹。
+3. 对每条轨迹拟合一个跨全序列的静态点，并与逐帧动态解释做带复杂度惩罚的模型竞争。
+4. 用首轮高置信静态点做受限的逐帧 PnP 位姿修正，然后重新计算点位置、协方差和最终动静模型。
+5. `static` 的每个有效帧输出完全相同的 `canonical_xyz`；`dynamic` 保留真实逐帧运动，只接受受测量协方差限制的二阶时间正则。
+6. 将空间邻近且跨帧距离近似不变的动态点组成局部运动组，拟合每帧刚体变换；非刚体区域可以自然分裂为多个组。
 
-可为动态 Track 额外估计速度或局部轨迹，但原始逐帧 3D 仍是事实数据源。
+`unknown` 表示样本不足或两个模型证据接近，不会为了提高分类覆盖率而强行归类。原始三角化永远保存在 `raw_xyz`，所有优化都可审计、可撤销。
 
 ## 7. 推荐输出格式
 
@@ -531,8 +570,9 @@ lost   --超过 max_gap 未恢复--> ended
 ├── camera_graph.json
 ├── tracks.h5
 │   ├── cameras/*
+│   ├── camera_corrections/frame_id, cam_id, R_w2c, t_w2c
 │   ├── observations/track_id, frame_id, cam_id, uv, ...
-│   ├── samples3d/track_id, frame_id, xyz, valid_3d, ...
+│   ├── samples3d/track_id, frame_id, xyz, raw_xyz, covariance, ...
 │   └── tracks/track_id, birth_frame, class, ...
 ├── debug/
 │   ├── overlays/...

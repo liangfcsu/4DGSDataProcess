@@ -5,13 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import SCHEMA_VERSION
 from .camera_graph import build_camera_graph, load_camera_graph, save_camera_graph
-from .classify import classify_tracks
 from .dataset import DatasetIndex, discover_dataset, validate_dataset
 from .export import (
     calculate_metrics,
@@ -26,6 +26,7 @@ from .spatial_matcher import HlocFeatureMatcher
 from .sparse_verify import SparseCloudVerifier, discover_per_frame_clouds
 from .temporal_tracker import TemporalTracker
 from .track_graph import build_spatial_groups, filter_spatial_matches
+from .trajectory_optimizer import optimize_trajectories, write_optimization_diagnostics
 from .visualize import assign_group_colors, write_track_overlays, write_trajectory_ply
 
 
@@ -52,9 +53,18 @@ class PipelineOptions:
 
 
 def _atomic_json(data: dict, path: Path) -> None:
+    def json_safe(value):
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        if isinstance(value, dict):
+            return {key: json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [json_safe(item) for item in value]
+        return value
+
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.write_text(json.dumps(json_safe(data), ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
 
 
@@ -330,13 +340,17 @@ def run_pipeline(options: PipelineOptions, config: dict) -> dict:
         write_tracks_h5(tracks, rig, output / "tracks.h5")
         return workload
 
-    classify_tracks(tracks, float(graph["scene_scale"]), config)
-    _mark(manifest, output, "classify")
+    optimization = optimize_trajectories(tracks, rig, float(graph["scene_scale"]), config)
+    tracks = optimization.tracks
+    write_optimization_diagnostics(optimization, output)
+    _mark(manifest, output, "classify", **optimization.metrics)
     if highest_stage == STAGES.index("classify"):
-        write_tracks_h5(tracks, rig, output / "tracks.h5")
+        write_tracks_h5(
+            tracks, rig, output / "tracks.h5", optimization.corrected_cameras
+        )
         return workload
 
-    write_tracks_h5(tracks, rig, output / "tracks.h5")
+    write_tracks_h5(tracks, rig, output / "tracks.h5", optimization.corrected_cameras)
     exports = output / "exports"
     exported_frames = write_frame_exports(
         tracks, exports, bool(config["export"]["npz"]), bool(config["export"]["ply"]), index.frame_ids
@@ -349,6 +363,7 @@ def run_pipeline(options: PipelineOptions, config: dict) -> dict:
         overlay_count = write_track_overlays(tracks, index, overlay_frames, output / "debug" / "overlays")
     metrics = calculate_metrics(tracks)
     metrics.update(manager.stats)
+    metrics.update(optimization.metrics)
     write_summaries(tracks, metrics, output)
     _mark(
         manifest, output, "export", track_count=len(tracks),
