@@ -9,12 +9,6 @@ import numpy as np
 
 from .schema import Camera, TriangulationResult
 
-try:
-    from scipy.optimize import least_squares
-except ImportError:  # pragma: no cover - linear fallback is still usable
-    least_squares = None
-
-
 def skew(vector: np.ndarray) -> np.ndarray:
     x, y, z = np.asarray(vector, dtype=np.float64)
     return np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]], dtype=np.float64)
@@ -92,19 +86,134 @@ def triangulation_angle_deg(cameras: list[Camera], xyz: np.ndarray) -> float:
     return max(angles, default=0.0)
 
 
-def _refine(cameras: list[Camera], uvs: np.ndarray, initial: np.ndarray, loss: str, max_nfev: int) -> np.ndarray:
-    if least_squares is None:
-        return initial
+def _projection_jacobian(camera: Camera, xyz: np.ndarray) -> np.ndarray:
+    x_cam = camera.R_w2c @ xyz + camera.t_w2c
+    homogeneous = camera.K @ x_cam
+    z = float(homogeneous[2])
+    if not math.isfinite(z) or abs(z) < 1e-12:
+        return np.full((2, 3), np.nan)
+    first = (camera.K[0] * z - homogeneous[0] * camera.K[2]) / (z * z)
+    second = (camera.K[1] * z - homogeneous[1] * camera.K[2]) / (z * z)
+    return np.vstack((first, second)) @ camera.R_w2c
 
-    def residual(xyz: np.ndarray) -> np.ndarray:
-        values = []
+
+def _robust_weight(norm: float, loss: str, scale: float) -> float:
+    normalized = norm / max(scale, 1e-12)
+    if loss == "huber":
+        return 1.0 if normalized <= 1.0 else 1.0 / normalized
+    if loss == "cauchy":
+        return 1.0 / (1.0 + normalized * normalized)
+    if loss in {"linear", "soft_l1"}:
+        return 1.0 if loss == "linear" else 1.0 / math.sqrt(1.0 + normalized * normalized)
+    raise ValueError(f"不支持的 robust_loss: {loss}")
+
+
+def _refine(
+    cameras: list[Camera],
+    uvs: np.ndarray,
+    initial: np.ndarray,
+    loss: str,
+    max_iterations: int,
+    loss_scale: float,
+) -> np.ndarray:
+    """Fast analytic 3D Gauss-Newton; avoids thousands of SciPy callbacks."""
+    xyz = np.asarray(initial, dtype=np.float64).copy()
+    for _ in range(max_iterations):
+        normal = np.zeros((3, 3), dtype=np.float64)
+        gradient = np.zeros(3, dtype=np.float64)
+        used = 0
         for camera, uv in zip(cameras, uvs):
-            projected, _ = project(camera, xyz)
-            values.extend(projected[0] - uv)
-        return np.asarray(values)
+            predicted, depth = project(camera, xyz)
+            if depth[0] <= 0:
+                continue
+            residual = predicted[0] - uv
+            jacobian = _projection_jacobian(camera, xyz)
+            if not np.all(np.isfinite(jacobian)):
+                continue
+            weight = _robust_weight(float(np.linalg.norm(residual)), loss, loss_scale)
+            normal += weight * (jacobian.T @ jacobian)
+            gradient += weight * (jacobian.T @ residual)
+            used += 1
+        if used < 2:
+            break
+        damping = max(float(np.trace(normal)) / 3.0, 1.0) * 1e-10
+        try:
+            delta = -np.linalg.solve(normal + damping * np.eye(3), gradient)
+        except np.linalg.LinAlgError:
+            break
+        if not np.all(np.isfinite(delta)):
+            break
+        xyz += delta
+        if float(np.linalg.norm(delta)) < 1e-9:
+            break
+    return xyz
 
-    result = least_squares(residual, initial, method="trf", loss=loss, max_nfev=max_nfev)
-    return result.x if result.success and np.all(np.isfinite(result.x)) else initial
+
+def refine_triangulation_candidate(
+    cameras: list[Camera],
+    uvs: np.ndarray,
+    initial: np.ndarray,
+    *,
+    min_views: int = 2,
+    max_reprojection_error_px: float = 3.0,
+    min_angle_deg: float = 1.0,
+    robust_loss: str = "huber",
+    max_refinement_iterations: int = 10,
+) -> TriangulationResult:
+    """Validate and refine one candidate selected by either CPU or CUDA."""
+    count = len(cameras)
+    empty = TriangulationResult(
+        valid=False,
+        xyz=np.full(3, np.nan),
+        inliers=np.zeros(count, dtype=bool),
+        errors=np.full(count, np.nan),
+        rmse=float("nan"),
+        angle_deg=0.0,
+        confidence=0.0,
+    )
+    xyz = np.asarray(initial, dtype=np.float64).copy()
+    if count < min_views or not np.all(np.isfinite(xyz)):
+        empty.reason = "invalid_initial_candidate"
+        return empty
+    errors, depths = reprojection_errors(cameras, uvs, xyz)
+    inliers = (errors <= max_reprojection_error_px) & (depths > 0)
+    if int(inliers.sum()) < min_views:
+        empty.errors, empty.reason = errors, "insufficient_initial_inliers"
+        return empty
+    for _ in range(4):
+        ids = np.flatnonzero(inliers)
+        subset_cameras = [cameras[index] for index in ids]
+        subset_uvs = np.asarray(uvs, dtype=np.float64)[ids]
+        linear = triangulate_dlt(subset_cameras, subset_uvs)
+        if np.all(np.isfinite(linear)):
+            xyz = linear
+        xyz = _refine(
+            subset_cameras, subset_uvs, xyz, robust_loss,
+            max_refinement_iterations, max_reprojection_error_px,
+        )
+        errors, depths = reprojection_errors(cameras, uvs, xyz)
+        updated = (errors <= max_reprojection_error_px) & (depths > 0)
+        if int(updated.sum()) < min_views or np.array_equal(updated, inliers):
+            break
+        inliers = updated
+    errors, depths = reprojection_errors(cameras, uvs, xyz)
+    inliers = inliers & (errors <= max_reprojection_error_px) & (depths > 0)
+    ids = np.flatnonzero(inliers)
+    if len(ids) < min_views:
+        empty.xyz, empty.errors = xyz, errors
+        empty.reason = "insufficient_inliers_after_refinement"
+        return empty
+    angle = triangulation_angle_deg([cameras[index] for index in ids], xyz)
+    if angle < min_angle_deg:
+        empty.xyz, empty.inliers, empty.errors = xyz, inliers, errors
+        empty.angle_deg, empty.reason = angle, "small_triangulation_angle"
+        return empty
+    rmse = float(np.sqrt(np.mean(errors[inliers] ** 2)))
+    reproj_score = math.exp(-(rmse**2) / (2 * max_reprojection_error_px**2))
+    view_score = min(len(ids) / 4.0, 1.0)
+    angle_score = min(angle / max(4.0 * min_angle_deg, 1e-6), 1.0)
+    confidence = float(np.clip(0.5 * reproj_score + 0.3 * view_score + 0.2 * angle_score, 0.0, 1.0))
+    return TriangulationResult(True, xyz, inliers, errors, rmse, angle, confidence, "ok")
 
 
 def robust_triangulate(
@@ -159,7 +268,10 @@ def robust_triangulate(
         subset_cameras = [cameras[i] for i in ids]
         subset_uvs = uvs[ids]
         xyz = triangulate_dlt(subset_cameras, subset_uvs)
-        xyz = _refine(subset_cameras, subset_uvs, xyz, robust_loss, max_refinement_iterations)
+        xyz = _refine(
+            subset_cameras, subset_uvs, xyz, robust_loss,
+            max_refinement_iterations, max_reprojection_error_px,
+        )
         errors, depths = reprojection_errors(cameras, uvs, xyz)
         updated = (errors <= max_reprojection_error_px) & (depths > 0)
         if np.array_equal(updated, inliers):

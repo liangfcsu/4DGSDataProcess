@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from collections import OrderedDict
 from pathlib import Path
 
 import h5py
@@ -38,6 +39,8 @@ class HlocFeatureMatcher:
         self.features_path = self.work_dir / "features.h5"
         self.matches_path = self.work_dir / "matches.h5"
         self.pairs_path = self.work_dir / "pairs.txt"
+        self._feature_cache: OrderedDict[str, tuple[np.ndarray, np.ndarray]] = OrderedDict()
+        self._feature_cache_size = int(config.get("performance", {}).get("feature_cache_images", 64))
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
     def extract(self, image_names: list[str], overwrite: bool = False) -> Path:
@@ -67,6 +70,8 @@ class HlocFeatureMatcher:
             as_half=bool(features.get("half_precision_cache", True)),
             overwrite=overwrite,
         )
+        if overwrite:
+            self._feature_cache.clear()
         return self.features_path
 
     def match_pairs(self, pairs: list[tuple[str, str]], overwrite: bool = False) -> Path:
@@ -104,13 +109,22 @@ class HlocFeatureMatcher:
         return self.matches_path
 
     def features(self, image_name: str) -> tuple[np.ndarray, np.ndarray]:
+        if image_name in self._feature_cache:
+            self._feature_cache.move_to_end(image_name)
+            return self._feature_cache[image_name]
         with h5py.File(self.features_path, "r", libver="latest") as handle:
             if image_name not in handle:
                 raise KeyError(f"特征缓存中没有 {image_name}")
             group = handle[image_name]
             keypoints = np.asarray(group["keypoints"], dtype=np.float32)
             scores = np.asarray(group["scores"], dtype=np.float32)
-        return keypoints, scores
+        result = (keypoints, scores)
+        if self._feature_cache_size > 0:
+            self._feature_cache[image_name] = result
+            self._feature_cache.move_to_end(image_name)
+            while len(self._feature_cache) > self._feature_cache_size:
+                self._feature_cache.popitem(last=False)
+        return result
 
     def match_links(self, name_a: str, name_b: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Read only feature IDs and scores, avoiding keypoint I/O for graph building."""

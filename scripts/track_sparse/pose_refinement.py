@@ -58,14 +58,12 @@ def refine_camera_poses(
                     (track.canonical_xyz, np.array([observation.u, observation.v]))
                 )
 
-    corrected: dict[tuple[int, int], Camera] = {}
-    records: list[dict] = []
-    rotation_values = []
-    translation_values = []
     minimum = int(section["min_points"])
-    for (frame_id, cam_id), values in sorted(correspondences.items()):
+
+    def solve_pose(item):
+        (frame_id, cam_id), values = item
         if len(values) < minimum:
-            continue
+            return None
         camera = cameras[cam_id]
         object_points = np.asarray([value[0] for value in values], dtype=np.float64)
         image_points = np.asarray([value[1] for value in values], dtype=np.float64)
@@ -86,7 +84,7 @@ def refine_camera_poses(
         )
         inlier_count = 0 if inliers is None else len(inliers)
         if not success or inlier_count < minimum:
-            continue
+            return None
         ids = inliers.reshape(-1)
         if hasattr(cv2, "solvePnPRefineLM"):
             rvec, tvec = cv2.solvePnPRefineLM(
@@ -103,7 +101,7 @@ def refine_camera_poses(
             rotation_deg > float(section["max_rotation_deg"])
             or translation > float(scene_scale) * float(section["max_translation_ratio"])
         ):
-            continue
+            return None
         blend = float(section["blend"])
         blended_delta = cv2.Rodrigues(delta_rvec * blend)[0]
         blended_R = blended_delta @ camera.R_w2c
@@ -111,10 +109,7 @@ def refine_camera_poses(
         refined = _camera_with_pose(camera, blended_R, blended_t)
         projected, _ = project(refined, object_points[ids])
         rmse = float(np.sqrt(np.mean(np.sum((projected - image_points[ids]) ** 2, axis=1))))
-        corrected[(frame_id, cam_id)] = refined
-        rotation_values.append(rotation_deg * blend)
-        translation_values.append(translation * blend)
-        records.append({
+        return (frame_id, cam_id), refined, rotation_deg * blend, translation * blend, {
             "frame_id": frame_id,
             "cam_id": cam_id,
             "R_w2c": refined.R_w2c.tolist(),
@@ -123,7 +118,21 @@ def refine_camera_poses(
             "translation_delta": translation * blend,
             "inlier_count": inlier_count,
             "reprojection_rmse": rmse,
-        })
+        }
+
+    corrected: dict[tuple[int, int], Camera] = {}
+    records: list[dict] = []
+    rotation_values = []
+    translation_values = []
+    solutions = [solve_pose(item) for item in sorted(correspondences.items())]
+    for solution in solutions:
+        if solution is None:
+            continue
+        key, refined, rotation, translation, record = solution
+        corrected[key] = refined
+        rotation_values.append(rotation)
+        translation_values.append(translation)
+        records.append(record)
     return corrected, records, {
         "pose_candidates": len(correspondences),
         "pose_corrections": len(corrected),
@@ -177,9 +186,9 @@ def refine_track_measurements(
         return {"pose_refined_samples": 0, "pose_refinement_rejections": 0}
     tri = config["triangulation"]
     section = config["pose_refinement"]
-    refined_count = 0
-    rejected = 0
-    for track in tracks.values():
+    def refine_track(track: Track) -> tuple[int, int]:
+        refined_count = 0
+        rejected = 0
         for frame_id, sample in track.samples.items():
             if not sample.valid_3d or not np.all(np.isfinite(sample.xyz)):
                 continue
@@ -219,4 +228,10 @@ def refine_track_measurements(
                 observation.reprojection_error = float(error)
                 observation.is_inlier = bool(is_inlier)
             refined_count += 1
+        return refined_count, rejected
+
+    refined_count = rejected = 0
+    for track_refined, track_rejected in (refine_track(track) for track in tracks.values()):
+        refined_count += track_refined
+        rejected += track_rejected
     return {"pose_refined_samples": refined_count, "pose_refinement_rejections": rejected}

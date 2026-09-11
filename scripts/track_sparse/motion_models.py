@@ -7,10 +7,9 @@ from collections.abc import Mapping
 
 import numpy as np
 
-from .geometry import project
 from .identity_validation import recompute_track_metadata
 from .schema import Camera, MotionClass, Track
-from .uncertainty import camera_at, mahalanobis_distance, projection_jacobian
+from .uncertainty import camera_at, mahalanobis_distance
 
 try:
     from scipy.sparse import csr_matrix, diags, eye
@@ -44,37 +43,56 @@ def optimize_static_point(
     if len(observations) > maximum:
         indices = np.linspace(0, len(observations) - 1, maximum, dtype=np.int64)
         observations = [observations[int(index)] for index in indices]
+    observations = [item for item in observations if item.cam_id in cameras]
+    if not observations:
+        return np.full(3, np.nan), np.full((3, 3), np.nan), float("inf"), 0
+    sample_cameras = [
+        camera_at(cameras, corrected_cameras, item.frame_id, item.cam_id)
+        for item in observations
+    ]
+    rotations = np.asarray([camera.R_w2c for camera in sample_cameras], dtype=np.float64)
+    translations = np.asarray([camera.t_w2c for camera in sample_cameras], dtype=np.float64)
+    intrinsics = np.asarray([camera.K for camera in sample_cameras], dtype=np.float64)
+    target_uvs = np.asarray([[item.u, item.v] for item in observations], dtype=np.float64)
+    observation_confidence = np.asarray([
+        max(0.05, item.association_score, item.tracker_confidence, item.spatial_confidence)
+        for item in observations
+    ], dtype=np.float64)
+
+    def residuals_and_jacobians(value: np.ndarray):
+        camera_xyz = np.einsum("nij,j->ni", rotations, value) + translations
+        homogeneous = np.einsum("nij,nj->ni", intrinsics, camera_xyz)
+        z = homogeneous[:, 2]
+        valid = np.isfinite(z) & (z > 1.0e-12)
+        predicted = homogeneous[:, :2] / np.where(valid, z, 1.0)[:, None]
+        residuals = predicted - target_uvs
+        denominator = np.where(valid, z * z, 1.0)[:, None]
+        first = (
+            intrinsics[:, 0] * z[:, None]
+            - homogeneous[:, 0, None] * intrinsics[:, 2]
+        ) / denominator
+        second = (
+            intrinsics[:, 1] * z[:, None]
+            - homogeneous[:, 1, None] * intrinsics[:, 2]
+        ) / denominator
+        jacobian_camera = np.stack((first, second), axis=1)
+        jacobians = np.einsum("nkq,nqj->nkj", jacobian_camera, rotations)
+        valid &= np.all(np.isfinite(residuals), axis=1)
+        valid &= np.all(np.isfinite(jacobians), axis=(1, 2))
+        residuals = np.where(valid[:, None], residuals, 0.0)
+        jacobians = np.where(valid[:, None, None], jacobians, 0.0)
+        return residuals, jacobians, valid
+
     huber = float(config["motion_models"]["static_huber_px"])
     damping = float(config["uncertainty"]["damping"])
     normal = np.eye(3)
-    residual_values: list[float] = []
     for _ in range(int(config["motion_models"]["static_refine_iterations"])):
-        normal = np.zeros((3, 3), dtype=np.float64)
-        gradient = np.zeros(3, dtype=np.float64)
-        residual_values = []
-        for observation in observations:
-            if observation.cam_id not in cameras:
-                continue
-            camera = camera_at(
-                cameras, corrected_cameras, observation.frame_id, observation.cam_id
-            )
-            predicted, depth = project(camera, xyz)
-            if depth[0] <= 0:
-                continue
-            residual = predicted[0] - np.array([observation.u, observation.v])
-            norm = float(np.linalg.norm(residual))
-            confidence = max(
-                0.05, observation.association_score,
-                observation.tracker_confidence, observation.spatial_confidence,
-            )
-            robust_weight = 1.0 if norm <= huber else huber / max(norm, 1e-12)
-            weight = confidence * robust_weight
-            jacobian = projection_jacobian(camera, xyz)
-            if not np.all(np.isfinite(jacobian)):
-                continue
-            normal += weight * (jacobian.T @ jacobian)
-            gradient += weight * (jacobian.T @ residual)
-            residual_values.append(norm)
+        residuals, jacobians, valid = residuals_and_jacobians(xyz)
+        norms = np.linalg.norm(residuals, axis=1)
+        robust = np.minimum(1.0, huber / np.maximum(norms, 1.0e-12))
+        weights = observation_confidence * robust * valid
+        normal = np.einsum("nki,nkj,n->ij", jacobians, jacobians, weights)
+        gradient = np.einsum("nki,nk,n->i", jacobians, residuals, weights)
         regularizer = max(float(np.trace(normal)) / 3.0, 1.0) * damping
         try:
             delta = -np.linalg.solve(normal + regularizer * np.eye(3), gradient)
@@ -87,29 +105,19 @@ def optimize_static_point(
             break
 
     # Recompute unbiased residuals and covariance at the solution.
-    normal = np.zeros((3, 3), dtype=np.float64)
-    squared_errors = []
-    for observation in observations:
-        if observation.cam_id not in cameras:
-            continue
-        camera = camera_at(cameras, corrected_cameras, observation.frame_id, observation.cam_id)
-        predicted, depth = project(camera, xyz)
-        if depth[0] <= 0:
-            continue
-        residual = predicted[0] - np.array([observation.u, observation.v])
-        jacobian = projection_jacobian(camera, xyz)
-        if not np.all(np.isfinite(jacobian)):
-            continue
-        normal += jacobian.T @ jacobian
-        squared_errors.append(float(residual @ residual))
-    rmse = math.sqrt(float(np.mean(squared_errors))) if squared_errors else float("inf")
+    residuals, jacobians, valid = residuals_and_jacobians(xyz)
+    normal = np.einsum(
+        "nki,nkj,n->ij", jacobians, jacobians, valid.astype(np.float64)
+    )
+    squared_errors = np.sum(residuals[valid] ** 2, axis=1)
+    rmse = math.sqrt(float(np.mean(squared_errors))) if len(squared_errors) else float("inf")
     regularizer = max(float(np.trace(normal)) / 3.0, 1.0) * damping
     try:
         covariance = np.linalg.pinv(normal + regularizer * np.eye(3), rcond=1e-10)
         covariance *= max(rmse, float(config["uncertainty"]["min_pixel_sigma"])) ** 2
     except np.linalg.LinAlgError:
         covariance = np.full((3, 3), np.nan)
-    return xyz, covariance, rmse, len(squared_errors)
+    return xyz, covariance, rmse, int(len(squared_errors))
 
 
 def _dynamic_reprojection_sse(track: Track) -> tuple[float, int, float]:
@@ -125,27 +133,6 @@ def _dynamic_reprojection_sse(track: Track) -> tuple[float, int, float]:
         values.append(sample.reprojection_rmse)
     rmse = math.sqrt(sse / count) if count else float("inf")
     return sse, count, rmse
-
-
-def _static_reprojection_sse(
-    track: Track,
-    xyz: np.ndarray,
-    cameras: Mapping[int, Camera],
-    corrected_cameras: Mapping[tuple[int, int], Camera] | None,
-) -> tuple[float, int]:
-    sse = 0.0
-    count = 0
-    for observation in _track_observations(track):
-        if observation.cam_id not in cameras:
-            continue
-        camera = camera_at(cameras, corrected_cameras, observation.frame_id, observation.cam_id)
-        predicted, depth = project(camera, xyz)
-        if depth[0] <= 0:
-            continue
-        residual = predicted[0] - np.array([observation.u, observation.v])
-        sse += float(residual @ residual)
-        count += 1
-    return sse, count
 
 
 def _smooth_dynamic(track: Track, scene_scale: float, config: dict) -> None:
@@ -245,15 +232,16 @@ def fit_motion_models(
     static_rmse_values = []
     for track in tracks.values():
         recompute_track_metadata(track)
-        canonical, covariance, static_rmse, static_count = optimize_static_point(
+        canonical, covariance, static_rmse, static_count_full = optimize_static_point(
             track, cameras, corrected_cameras, config
         )
         track.canonical_xyz = canonical
         track.canonical_covariance = covariance
-        static_sse, static_count_full = _static_reprojection_sse(
-            track, canonical, cameras, corrected_cameras
-        ) if np.all(np.isfinite(canonical)) else (float("inf"), 0)
-        dynamic_sse, dynamic_count, dynamic_rmse = _dynamic_reprojection_sse(track)
+        static_sse = (
+            static_rmse * static_rmse * static_count_full
+            if math.isfinite(static_rmse) else float("inf")
+        )
+        dynamic_sse, dynamic_count, _ = _dynamic_reprojection_sse(track)
         count = max(2, min(static_count_full, dynamic_count))
         epsilon = float(section["score_epsilon"])
         static_mean = max(static_sse / max(static_count_full, 1), epsilon)
@@ -298,7 +286,6 @@ def fit_motion_models(
         counts[track.motion_class.value] += 1
         if math.isfinite(static_rmse):
             static_rmse_values.append(static_rmse)
-
         if optimize_coordinates:
             if track.motion_class == MotionClass.STATIC and np.all(np.isfinite(canonical)):
                 for sample in track.samples.values():

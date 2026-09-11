@@ -152,8 +152,8 @@ python3 scripts/track_sparse/run.py \
 `--resume` 同时校验原视频元数据、标定来源、抽帧参数、去畸变参数以及轨迹配置。
 参数或输入发生变化时会拒绝混用旧缓存；确认要重算时使用 `--overwrite`。
 
-从 schema v1 切到 v2 时配置指纹一定变化。若要保留已经完成的抽帧、标定和去畸变，
-可直接把这些产物作为显式输入，只重算轨迹层：
+从旧配置切到当前版本时轨迹配置指纹会变化。只要输入以及 SuperPoint/SuperGlue
+参数没有变化，`--resume` 会保留这些昂贵缓存并重新构建受影响的轨迹层：
 
 ```bash
 /opt/4dgs-player/env/bin/python3.11 scripts/track_sparse/run.py \
@@ -161,14 +161,36 @@ python3 scripts/track_sparse/run.py \
   --sparse-dir outputs/flame_steak_tracks/preprocess/calibration/reference_sparse/0 \
   --output outputs/flame_steak_tracks \
   --config scripts/track_sparse/configs/flame_steak.yaml \
-  --start-frame 1 --end-frame 100 --gpu 0 --overwrite
+  --start-frame 1 --end-frame 100 --gpu 0 --resume
 ```
 
-该命令会保留 `preprocess/`，但会清理并重建轨迹层的 feature/match 缓存和导出。
+### 0.4 GPU、CPU 与中断恢复
 
-`--stages` 会运行到所选最晚阶段，并自动补齐它之前的依赖。例如 `--stages prepare,camera_graph` 不加载模型；`--stages spawn` 会生成特征和空间匹配；完整输出使用默认的 `all`。若输入或配置指纹发生变化，`--resume` 会拒绝旧缓存并提示换输出目录或显式 `--overwrite`。
+`flame_steak.yaml` 针对当前 RTX GPU 和 24 线程 CPU 默认设置为：
 
-### 0.4 输出
+```yaml
+performance:
+  triangulation_backend: cuda
+  cpu_workers: 20
+  gpu_hypothesis_batch_size: 65536
+  feature_cache_images: 96
+  checkpoint_interval_frames: 10
+  cache_spatial_groups: true
+```
+
+SuperPoint/SuperGlue 继续使用 `--gpu` 指定的 GPU。出生帧与逐帧三角化的相机对假设、
+内点判定和 Gauss-Newton 更新会批量送入 CUDA；CPU workers 用于 CUDA 不可用或数值
+回退时的并行三角化。同一图像的 keypoint 还会保存在有界内存缓存中，避免每条轨迹
+重复读取 HDF5。
+
+`spatial_groups.pkl` 缓存出生帧几何，`track_checkpoint.pkl` 每 10 帧原子保存一次完整
+生命周期状态。运行中可以按 `Ctrl+C`；之后使用完全相同的命令和 `--resume`，会从
+最近的 checkpoint 继续。第一次从旧版本切换时还没有 checkpoint，所以会从 frame 1
+重建一次轨迹，但不会重算已有的 SuperPoint/SuperGlue 缓存。
+
+`--stages` 会运行到所选最晚阶段，并自动补齐它之前的依赖。例如 `--stages prepare,camera_graph` 不加载模型；`--stages spawn` 会生成特征和空间匹配；完整输出使用默认的 `all`。输入或特征/匹配参数变化时 `--resume` 会拒绝不兼容缓存；仅下游几何或性能参数变化时，会保留兼容的特征/匹配并重建后续阶段。
+
+### 0.5 输出
 
 ```text
 <output>/
@@ -183,6 +205,8 @@ python3 scripts/track_sparse/run.py \
 ├── manifest.json                 # 输入/配置指纹、坐标约定和阶段状态
 ├── camera_graph.json             # 邻接边、几何分数、验证匹配数
 ├── features.h5 / matches.h5      # 可断点复用的 HLOC 缓存
+├── spatial_groups.pkl             # 出生帧多视角几何缓存
+├── track_checkpoint.pkl           # 最近完成帧的轨迹状态
 ├── tracks.h5                     # cameras / observations / samples3d / tracks
 ├── tracks_summary.json           # 每轨迹摘要和全局指标
 ├── freetimegs_tracks.npz         # 扁平 4DGS 适配数据
@@ -201,7 +225,7 @@ python3 scripts/track_sparse/run.py \
 
 `tracks.h5/observations` 按 `(track_id, frame_id, cam_id)` 排序；`samples3d` 按 `(track_id, frame_id)` 排序。schema v2 中 `samples3d/xyz` 是下游应使用的最终坐标，`raw_xyz` 是不可改写的首次三角化，`pose_refined_xyz` 和 `optimized_xyz` 分别记录位姿修正结果与运动模型结果。无可靠双视角几何时仍会保留 2D Observation，但 `valid_3d=false`，不会插值伪装成测量值。
 
-### 0.5 测试
+### 0.6 测试
 
 ```bash
 PYTHONPATH=scripts /opt/4dgs-player/env/bin/python3.11 \

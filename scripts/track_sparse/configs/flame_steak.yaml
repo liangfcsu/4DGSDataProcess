@@ -65,7 +65,17 @@ triangulation:
   min_angle_deg: 1.0
   max_reprojection_error_px: 3.0
   robust_loss: huber
-  max_refinement_iterations: 50
+  max_refinement_iterations: 10
+
+# This workstation exposes 24 logical CPUs and an RTX 5090. Leave four CPU
+# threads for HDF5, the desktop and CUDA driver work.
+performance:
+  triangulation_backend: cuda
+  cpu_workers: 20
+  gpu_hypothesis_batch_size: 65536
+  feature_cache_images: 96
+  checkpoint_interval_frames: 10
+  cache_spatial_groups: true
 
 # Raw-video preprocessing creates one fixed reference sparse model, not a
 # per-frame persparse cloud, so there is no independent cloud to verify here.

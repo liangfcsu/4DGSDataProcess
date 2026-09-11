@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
 from .geometry import fundamental_matrix, robust_triangulate, sampson_errors
 from .schema import Camera, FeatureObservation, PairMatches, SpatialGroup
+from .triangulation_batch import TriangulationInput, cuda_is_available, triangulate_cuda_batch
 
 
 Node = tuple[int, int]  # (cam_id, feature_id)
@@ -83,7 +86,7 @@ def build_spatial_groups(
     feature_data: dict[int, tuple[np.ndarray, np.ndarray]],
     cameras: dict[int, Camera],
     config: dict,
-) -> tuple[list[SpatialGroup], dict[str, int]]:
+) -> tuple[list[SpatialGroup], dict[str, int | float]]:
     edges: list[tuple[float, Node, Node]] = []
     for cam_a, cam_b, matches in pair_matches:
         for feature_a, feature_b, score in zip(matches.feature_ids_a, matches.feature_ids_b, matches.scores):
@@ -91,15 +94,17 @@ def build_spatial_groups(
     edges.sort(key=lambda item: (-item[0], item[1], item[2]))
     components = ConstrainedComponents()
     conflicts = 0
-    edge_scores: dict[frozenset[Node], float] = {}
+    incident_scores: dict[Node, list[float]] = defaultdict(list)
     for score, first, second in edges:
-        edge_scores[frozenset((first, second))] = score
+        incident_scores[first].append(score)
+        incident_scores[second].append(score)
         if not components.merge(first, second):
             conflicts += 1
 
     groups: list[SpatialGroup] = []
     rejected_geometry = 0
     rejected_views = 0
+    candidates = []
     for nodes in components.groups():
         if len(nodes) < int(config["spawn"]["min_seed_views"]):
             rejected_views += 1
@@ -107,15 +112,45 @@ def build_spatial_groups(
         ordered = sorted(nodes)
         group_cameras = [cameras[cam_id] for cam_id, _ in ordered]
         uvs = np.asarray([feature_data[cam_id][0][feature_id] for cam_id, feature_id in ordered])
-        result = robust_triangulate(
-            group_cameras,
-            uvs,
-            min_views=int(config["triangulation"]["min_views"]),
-            max_reprojection_error_px=float(config["triangulation"]["max_reprojection_error_px"]),
-            min_angle_deg=float(config["triangulation"]["min_angle_deg"]),
-            robust_loss=config["triangulation"]["robust_loss"],
-            max_refinement_iterations=int(config["triangulation"]["max_refinement_iterations"]),
-        )
+        candidates.append((ordered, group_cameras, uvs))
+
+    tri = config["triangulation"]
+    keywords = {
+        "min_views": int(tri["min_views"]),
+        "max_reprojection_error_px": float(tri["max_reprojection_error_px"]),
+        "min_angle_deg": float(tri["min_angle_deg"]),
+        "robust_loss": tri["robust_loss"],
+        "max_refinement_iterations": int(tri["max_refinement_iterations"]),
+    }
+    backend = str(config["performance"]["triangulation_backend"])
+    use_cuda = backend in {"auto", "cuda"} and cuda_is_available()
+    results = {}
+    cuda_stats: dict[str, int | float] = {}
+    if use_cuda and candidates:
+        inputs = [
+            TriangulationInput(index, group_cameras, uvs)
+            for index, (_, group_cameras, uvs) in enumerate(candidates)
+        ]
+        try:
+            results, cuda_stats = triangulate_cuda_batch(inputs, config)
+        except RuntimeError:
+            results = {}
+    missing = [index for index in range(len(candidates)) if index not in results]
+    if missing:
+        def solve(index: int):
+            _, group_cameras, uvs = candidates[index]
+            return index, robust_triangulate(group_cameras, uvs, **keywords)
+
+        workers = max(1, int(config["performance"]["cpu_workers"]))
+        if workers > 1 and len(missing) > 1:
+            with ThreadPoolExecutor(max_workers=min(workers, len(missing))) as executor:
+                solved = executor.map(solve, missing)
+                results.update(dict(solved))
+        else:
+            results.update(dict(solve(index) for index in missing))
+
+    for candidate_index, (ordered, _, uvs) in enumerate(candidates):
+        result = results[candidate_index]
         if not result.valid or int(result.inliers.sum()) < int(config["spawn"]["min_seed_views"]):
             rejected_geometry += 1
             continue
@@ -123,10 +158,7 @@ def build_spatial_groups(
         for index in np.flatnonzero(result.inliers):
             cam_id, feature_id = ordered[int(index)]
             keypoint_score = float(feature_data[cam_id][1][feature_id])
-            incident = [
-                value for key, value in edge_scores.items()
-                if (cam_id, feature_id) in key
-            ]
+            incident = incident_scores[(cam_id, feature_id)]
             spatial_score = float(np.mean(incident)) if incident else keypoint_score
             observations[cam_id] = FeatureObservation(
                 frame_id, cam_id, feature_id, uvs[index].astype(np.float32), keypoint_score, spatial_score
@@ -140,7 +172,7 @@ def build_spatial_groups(
             geometry_confidence=result.confidence,
         ))
     groups.sort(key=lambda group: tuple(group.xyz.tolist()))
-    return groups, {
+    stats = {
         "candidate_edges": len(edges),
         "merge_conflicts": conflicts,
         "components": len(components.groups()),
@@ -148,4 +180,5 @@ def build_spatial_groups(
         "rejected_geometry": rejected_geometry,
         "accepted_groups": len(groups),
     }
-
+    stats.update({f"spawn_{key}": value for key, value in cuda_stats.items()})
+    return groups, stats

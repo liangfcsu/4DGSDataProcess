@@ -12,6 +12,9 @@ from track_sparse.motion_models import fit_motion_models
 from track_sparse.observation_graph import ObservationGraphAssociator
 from track_sparse.pose_refinement import refine_camera_poses
 from track_sparse.schema import Camera, MotionClass, Observation, Track, TrackSample, TrackState
+from track_sparse.triangulation_batch import (
+    TriangulationInput, cuda_is_available, triangulate_cuda_batch,
+)
 from track_sparse.uncertainty import estimate_point_covariance
 
 
@@ -50,6 +53,31 @@ class _ConflictTemporal:
 
 
 class TrajectoryOptimizationTests(unittest.TestCase):
+    @unittest.skipUnless(cuda_is_available(), "CUDA is not available")
+    def test_cuda_batch_triangulation_matches_geometry(self):
+        cameras = [
+            _camera(0, [-1, 0, 0]),
+            _camera(1, [1, 0, 0]),
+            _camera(2, [0, 0.5, 0]),
+        ]
+        inputs = []
+        expected = []
+        for track_id in range(1, 7):
+            xyz = np.array([0.03 * track_id, -0.02 * track_id, 5.0 + 0.1 * track_id])
+            uvs = np.asarray([project(camera, xyz)[0][0] for camera in cameras])
+            inputs.append(TriangulationInput(track_id, cameras, uvs))
+            expected.append(xyz)
+        config = apply_overrides(load_config(), {
+            "performance.cpu_workers": 2,
+            "performance.gpu_hypothesis_batch_size": 8,
+            "triangulation.min_angle_deg": 0.1,
+        })
+        results, stats = triangulate_cuda_batch(inputs, config)
+        self.assertGreater(stats["cuda_hypotheses"], 0)
+        for item, xyz in zip(inputs, expected):
+            self.assertTrue(results[item.track_id].valid)
+            self.assertTrue(np.allclose(results[item.track_id].xyz, xyz, atol=1e-4))
+
     def test_uncertainty_reflects_camera_baseline(self):
         xyz = np.array([0.0, 0.0, 8.0])
         narrow = [_camera(0, [-0.05, 0, 0]), _camera(1, [0.05, 0, 0])]

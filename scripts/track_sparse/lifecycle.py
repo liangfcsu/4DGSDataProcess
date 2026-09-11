@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import pickle
+import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 import logging
+from pathlib import Path
 
 import numpy as np
 
 from .geometry import robust_triangulate
 from .observation_graph import ObservationGraphAssociator
-from .schema import Observation, SpatialGroup, Track, TrackSample, TrackState
+from .schema import Observation, SpatialGroup, Track, TrackSample, TrackState, TriangulationResult
 from .temporal_tracker import TemporalTracker
+from .triangulation_batch import TriangulationInput, cuda_is_available, triangulate_cuda_batch
 
 
 LOGGER = logging.getLogger("track_sparse")
@@ -27,6 +32,16 @@ class TrackManager:
         self.next_track_id = 1
         self.stats = defaultdict(int)
         self.associator = ObservationGraphAssociator(temporal, sorted(cameras), config)
+        requested = str(config["performance"]["triangulation_backend"]).lower()
+        if requested not in {"auto", "cpu", "cuda"}:
+            raise ValueError("performance.triangulation_backend 必须是 auto/cpu/cuda")
+        available = cuda_is_available() if requested != "cpu" else False
+        if requested == "cuda" and not available:
+            LOGGER.warning("请求 CUDA 三角化，但 CUDA 不可用；回退到多线程 CPU")
+        self.triangulation_backend = (
+            "cuda" if available and requested in {"auto", "cuda"} else "cpu"
+        )
+        self.stats["triangulation_backend"] = self.triangulation_backend
 
     def _propagate_to_frame(self, frame_id: int) -> None:
         observations, stats = self.associator.associate(self.tracks, frame_id)
@@ -153,23 +168,21 @@ class TrackManager:
                 feature_owner[(cam_id, seed.feature_id)] = track_id
                 insert(cam_id, float(seed.uv[0]), float(seed.uv[1]), track_id)
 
-    def _triangulate_track(self, track: Track, frame_id: int) -> TrackSample:
-        observations = sorted(
+    @staticmethod
+    def _frame_observations(track: Track, frame_id: int) -> list[Observation]:
+        return sorted(
             (obs for (frame, _), obs in track.observations.items() if frame == frame_id and obs.visible),
             key=lambda item: item.cam_id,
         )
+
+    def _sample_from_result(
+        self,
+        track: Track,
+        frame_id: int,
+        observations: list[Observation],
+        result: TriangulationResult,
+    ) -> TrackSample:
         cameras = [self.cameras[obs.cam_id] for obs in observations]
-        uvs = np.asarray([[obs.u, obs.v] for obs in observations], dtype=np.float64)
-        tri = self.config["triangulation"]
-        result = robust_triangulate(
-            cameras,
-            uvs,
-            min_views=int(tri["min_views"]),
-            max_reprojection_error_px=float(tri["max_reprojection_error_px"]),
-            min_angle_deg=float(tri["min_angle_deg"]),
-            robust_loss=tri["robust_loss"],
-            max_refinement_iterations=int(tri["max_refinement_iterations"]),
-        )
         for index, observation in enumerate(observations):
             if index < len(result.errors):
                 observation.reprojection_error = float(result.errors[index])
@@ -193,6 +206,69 @@ class TrackManager:
                 sample.sparse_support_distance = distance
                 sample.geometry_confidence = float((1.0 - weight) * sample.geometry_confidence + weight * confidence)
         return sample
+
+    def _triangulate_track(self, track: Track, frame_id: int) -> TrackSample:
+        observations = self._frame_observations(track, frame_id)
+        cameras = [self.cameras[obs.cam_id] for obs in observations]
+        uvs = np.asarray([[obs.u, obs.v] for obs in observations], dtype=np.float64)
+        tri = self.config["triangulation"]
+        result = robust_triangulate(
+            cameras,
+            uvs,
+            min_views=int(tri["min_views"]),
+            max_reprojection_error_px=float(tri["max_reprojection_error_px"]),
+            min_angle_deg=float(tri["min_angle_deg"]),
+            robust_loss=tri["robust_loss"],
+            max_refinement_iterations=int(tri["max_refinement_iterations"]),
+        )
+        return self._sample_from_result(track, frame_id, observations, result)
+
+    def _triangulate_frame(
+        self,
+        tracks: list[Track],
+        frame_id: int,
+        executor: ThreadPoolExecutor | None,
+    ) -> list[TrackSample]:
+        started = time.perf_counter()
+        if self.triangulation_backend == "cuda" and tracks:
+            inputs = []
+            observations_by_track = {}
+            for track in tracks:
+                observations = self._frame_observations(track, frame_id)
+                observations_by_track[track.track_id] = observations
+                inputs.append(TriangulationInput(
+                    track.track_id,
+                    [self.cameras[item.cam_id] for item in observations],
+                    np.asarray([[item.u, item.v] for item in observations], dtype=np.float64).reshape(-1, 2),
+                ))
+            try:
+                results, stats = triangulate_cuda_batch(inputs, self.config)
+            except RuntimeError as exc:
+                LOGGER.warning("CUDA 批量三角化失败，本次运行回退 CPU: %s", exc)
+                self.triangulation_backend = "cpu"
+                self.stats["triangulation_backend"] = "cpu_fallback"
+            else:
+                for key, value in stats.items():
+                    self.stats[key] += value
+                samples = []
+                for track in tracks:
+                    result = results.get(track.track_id)
+                    if result is None:
+                        samples.append(self._triangulate_track(track, frame_id))
+                    else:
+                        samples.append(self._sample_from_result(
+                            track, frame_id, observations_by_track[track.track_id], result
+                        ))
+                self.stats["triangulation_seconds"] += time.perf_counter() - started
+                return samples
+        if executor is None:
+            samples = [self._triangulate_track(track, frame_id) for track in tracks]
+        else:
+            samples = list(executor.map(
+                lambda track: self._triangulate_track(track, frame_id), tracks
+            ))
+        self.stats["triangulation_seconds"] += time.perf_counter() - started
+        return samples
 
     def _update_state(self, track: Track, sample: TrackSample, frame_id: int) -> None:
         previous = track.state
@@ -224,20 +300,92 @@ class TrackManager:
         sample.state = track.state
         track.samples[frame_id] = sample
 
-    def run(self, groups_by_frame: dict[int, list[SpatialGroup]]) -> dict[int, Track]:
+    def _load_checkpoint(self, path: Path, fingerprint: str) -> int | None:
+        if not path.is_file():
+            return None
+        try:
+            with path.open("rb") as handle:
+                payload = pickle.load(handle)
+        except (OSError, EOFError, pickle.UnpicklingError, AttributeError) as exc:
+            LOGGER.warning("忽略损坏的轨迹 checkpoint %s: %s", path, exc)
+            return None
+        if payload.get("fingerprint") != fingerprint:
+            LOGGER.warning("轨迹 checkpoint 指纹不一致，将从 frame 1 重建")
+            return None
+        self.tracks = payload["tracks"]
+        self.next_track_id = int(payload["next_track_id"])
+        self.stats = defaultdict(int, payload.get("stats", {}))
+        self.stats["triangulation_backend"] = self.triangulation_backend
+        return int(payload["last_completed_frame"])
+
+    def _write_checkpoint(self, path: Path, fingerprint: str, frame_id: int) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        with temporary.open("wb") as handle:
+            pickle.dump({
+                "version": 1,
+                "fingerprint": fingerprint,
+                "last_completed_frame": frame_id,
+                "next_track_id": self.next_track_id,
+                "tracks": self.tracks,
+                "stats": dict(self.stats),
+            }, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        temporary.replace(path)
+
+    def run(
+        self,
+        groups_by_frame: dict[int, list[SpatialGroup]],
+        checkpoint_path: Path | None = None,
+        checkpoint_fingerprint: str = "",
+        resume: bool = False,
+    ) -> dict[int, Track]:
         interval = max(1, int(self.config["track"].get("log_interval", 10)))
-        for frame_index, frame_id in enumerate(self.frames):
-            self._propagate_to_frame(frame_id)
-            self._spawn_and_merge(groups_by_frame.get(frame_id, []))
-            for track in list(self.tracks.values()):
-                if frame_id < track.birth_frame or track.state == TrackState.ENDED:
-                    continue
-                sample = self._triangulate_track(track, frame_id)
-                self._update_state(track, sample, frame_id)
-            if frame_index == 0 or (frame_index + 1) % interval == 0 or frame_index + 1 == len(self.frames):
-                active = sum(track.state != TrackState.ENDED for track in self.tracks.values())
+        checkpoint_interval = max(1, int(self.config["performance"]["checkpoint_interval_frames"]))
+        completed_frame = None
+        if resume and checkpoint_path is not None:
+            completed_frame = self._load_checkpoint(checkpoint_path, checkpoint_fingerprint)
+            if completed_frame is not None:
                 LOGGER.info(
-                    "轨迹构建 %d/%d (frame=%d): total=%d, live=%d",
-                    frame_index + 1, len(self.frames), frame_id, len(self.tracks), active,
+                    "恢复轨迹 checkpoint: frame=%d, tracks=%d",
+                    completed_frame, len(self.tracks),
                 )
+        workers = max(1, int(self.config["performance"]["cpu_workers"]))
+        executor = (
+            ThreadPoolExecutor(max_workers=workers, thread_name_prefix="triangulate")
+            if workers > 1 else None
+        )
+        LOGGER.info(
+            "三角化后端: %s, CPU workers=%d, checkpoint=%d 帧",
+            self.triangulation_backend, workers, checkpoint_interval,
+        )
+        try:
+            for frame_index, frame_id in enumerate(self.frames):
+                if completed_frame is not None and frame_id <= completed_frame:
+                    continue
+                self._propagate_to_frame(frame_id)
+                self._spawn_and_merge(groups_by_frame.get(frame_id, []))
+                frame_tracks = [
+                    track for track in self.tracks.values()
+                    if frame_id >= track.birth_frame and track.state != TrackState.ENDED
+                ]
+                samples = self._triangulate_frame(frame_tracks, frame_id, executor)
+                for track, sample in zip(frame_tracks, samples):
+                    self._update_state(track, sample, frame_id)
+                if (
+                    checkpoint_path is not None
+                    and ((frame_index + 1) % checkpoint_interval == 0 or frame_index + 1 == len(self.frames))
+                ):
+                    self._write_checkpoint(
+                        checkpoint_path, checkpoint_fingerprint, frame_id
+                    )
+                    LOGGER.info("已保存轨迹 checkpoint: frame=%d", frame_id)
+                if frame_index == 0 or (frame_index + 1) % interval == 0 or frame_index + 1 == len(self.frames):
+                    active = sum(track.state != TrackState.ENDED for track in self.tracks.values())
+                    LOGGER.info(
+                        "轨迹构建 %d/%d (frame=%d): total=%d, live=%d",
+                        frame_index + 1, len(self.frames), frame_id, len(self.tracks), active,
+                    )
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
         return self.tracks

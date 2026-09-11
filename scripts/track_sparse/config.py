@@ -71,6 +71,9 @@ def validate_config(config: dict[str, Any]) -> None:
         "pose_refinement.min_points": config["pose_refinement"]["min_points"],
         "motion_groups.min_group_size": config["motion_groups"]["min_group_size"],
         "motion_groups.rigid_fit_min_points": config["motion_groups"]["rigid_fit_min_points"],
+        "performance.cpu_workers": config["performance"]["cpu_workers"],
+        "performance.gpu_hypothesis_batch_size": config["performance"]["gpu_hypothesis_batch_size"],
+        "performance.checkpoint_interval_frames": config["performance"]["checkpoint_interval_frames"],
     }
     invalid = [name for name, value in positive.items() if float(value) <= 0]
     if invalid:
@@ -84,6 +87,10 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError("temporal.offsets 必须包含正整数")
     if config["temporal"].get("tracker") != "superglue":
         raise ConfigError("当前内置时间跟踪后端仅支持 temporal.tracker=superglue")
+    if config["performance"]["triangulation_backend"] not in {"auto", "cpu", "cuda"}:
+        raise ConfigError("performance.triangulation_backend 必须是 auto/cpu/cuda")
+    if int(config["performance"]["feature_cache_images"]) < 0:
+        raise ConfigError("performance.feature_cache_images 不能小于 0")
     fractions = {
         "association.cycle_inconsistent_weight": config["association"]["cycle_inconsistent_weight"],
         "identity_validation.cycle_bad_fraction": config["identity_validation"]["cycle_bad_fraction"],
