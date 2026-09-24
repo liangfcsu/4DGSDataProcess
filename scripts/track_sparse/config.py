@@ -34,6 +34,10 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
             user = yaml.safe_load(handle) or {}
         if not isinstance(user, dict):
             raise ConfigError("配置文件根节点必须是映射")
+        # ``run`` belongs to start.py (paths, GPU and resume mode), not to the
+        # algorithm configuration or its cache fingerprint.
+        user = copy.deepcopy(user)
+        user.pop("run", None)
         config = _deep_merge(config, user)
     validate_config(config)
     return config
