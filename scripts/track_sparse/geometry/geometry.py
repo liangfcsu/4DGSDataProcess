@@ -7,7 +7,7 @@ import math
 
 import numpy as np
 
-from .schema import Camera, TriangulationResult
+from track_sparse.core.schema import Camera, TriangulationResult
 
 def skew(vector: np.ndarray) -> np.ndarray:
     x, y, z = np.asarray(vector, dtype=np.float64)

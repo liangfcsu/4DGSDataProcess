@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from track_sparse.io_colmap import load_rig, qvec_to_rotmat, read_images_text
+from track_sparse.input.io_colmap import load_rig, qvec_to_rotmat, read_images_text
 
 
 class ColmapIoTests(unittest.TestCase):

@@ -7,9 +7,9 @@ from collections.abc import Mapping
 
 import numpy as np
 
-from .identity_validation import recompute_track_metadata
-from .schema import Camera, MotionClass, Track
-from .uncertainty import camera_at, mahalanobis_distance
+from track_sparse.tracking.identity_validation import recompute_track_metadata
+from track_sparse.core.schema import Camera, MotionClass, Track
+from track_sparse.geometry.uncertainty import camera_at, mahalanobis_distance
 
 try:
     from scipy.sparse import csr_matrix, diags, eye

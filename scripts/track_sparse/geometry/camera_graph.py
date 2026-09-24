@@ -9,8 +9,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .geometry import project
-from .schema import Camera, Point3D
+from track_sparse.geometry.geometry import project
+from track_sparse.core.schema import Camera, Point3D
 
 
 def _scene_scale(cameras: dict[int, Camera]) -> float:

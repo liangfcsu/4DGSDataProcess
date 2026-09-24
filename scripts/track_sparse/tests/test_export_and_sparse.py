@@ -7,9 +7,9 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from track_sparse.export import write_frame_exports, write_tracks_h5
-from track_sparse.schema import Camera
-from track_sparse.sparse_verify import SparseCloudVerifier
+from track_sparse.exports.export import write_frame_exports, write_tracks_h5
+from track_sparse.core.schema import Camera
+from track_sparse.tracking.sparse_verify import SparseCloudVerifier
 
 
 def _camera() -> Camera:

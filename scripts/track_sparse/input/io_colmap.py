@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .schema import Camera, ColmapCamera, ColmapImage, Point3D
+from track_sparse.core.schema import Camera, ColmapCamera, ColmapImage, Point3D
 
 
 CAM_RE = re.compile(r"cam[_-]?0*(\d+)", re.IGNORECASE)

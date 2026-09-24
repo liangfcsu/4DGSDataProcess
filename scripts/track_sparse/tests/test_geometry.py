@@ -4,8 +4,8 @@ import unittest
 
 import numpy as np
 
-from track_sparse.geometry import project, robust_triangulate
-from track_sparse.schema import Camera
+from track_sparse.geometry.geometry import project, robust_triangulate
+from track_sparse.core.schema import Camera
 
 
 def camera(cam_id: int, center: np.ndarray) -> Camera:

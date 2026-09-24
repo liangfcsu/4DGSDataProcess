@@ -6,9 +6,9 @@ from collections import OrderedDict
 
 import numpy as np
 
-from .dataset import DatasetIndex
-from .schema import Observation
-from .spatial_matcher import HlocFeatureMatcher
+from track_sparse.input.dataset import DatasetIndex
+from track_sparse.core.schema import Observation
+from track_sparse.matching.spatial_matcher import HlocFeatureMatcher
 
 
 class TemporalTracker:

@@ -7,8 +7,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .schema import MotionClass, Track, TrackState
-from .uncertainty import mahalanobis_distance
+from track_sparse.core.schema import MotionClass, Track, TrackState
+from track_sparse.geometry.uncertainty import mahalanobis_distance
 
 
 @dataclass(slots=True)

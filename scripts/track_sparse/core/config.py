@@ -9,7 +9,7 @@ from typing import Any
 import yaml
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).parent / "configs" / "default.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "default.yaml"
 
 
 class ConfigError(ValueError):
@@ -29,12 +29,15 @@ def _deep_merge(base: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
     with DEFAULT_CONFIG_PATH.open("r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle) or {}
+    if not isinstance(config, dict):
+        raise ConfigError("默认配置文件根节点必须是映射")
+    config.pop("run", None)
     if path:
         with Path(path).expanduser().open("r", encoding="utf-8") as handle:
             user = yaml.safe_load(handle) or {}
         if not isinstance(user, dict):
             raise ConfigError("配置文件根节点必须是映射")
-        # ``run`` belongs to start.py (paths, GPU and resume mode), not to the
+        # ``run`` belongs to run.py (paths, GPU and resume mode), not to the
         # algorithm configuration or its cache fingerprint.
         user = copy.deepcopy(user)
         user.pop("run", None)

@@ -7,7 +7,7 @@ from collections import defaultdict
 
 import numpy as np
 
-from .schema import MotionClass, Track
+from track_sparse.core.schema import MotionClass, Track
 
 try:
     from scipy.spatial import cKDTree

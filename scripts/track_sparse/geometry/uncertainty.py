@@ -7,7 +7,7 @@ from collections.abc import Mapping
 
 import numpy as np
 
-from .schema import Camera, Track
+from track_sparse.core.schema import Camera, Track
 
 
 CameraKey = tuple[int, int]  # (frame_id, cam_id)

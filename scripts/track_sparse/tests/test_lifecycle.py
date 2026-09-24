@@ -6,10 +6,10 @@ from pathlib import Path
 
 import numpy as np
 
-from track_sparse.config import apply_overrides, load_config
-from track_sparse.geometry import project
-from track_sparse.lifecycle import TrackManager
-from track_sparse.schema import Camera, FeatureObservation, Observation, SpatialGroup
+from track_sparse.core.config import apply_overrides, load_config
+from track_sparse.geometry.geometry import project
+from track_sparse.tracking.lifecycle import TrackManager
+from track_sparse.core.schema import Camera, FeatureObservation, Observation, SpatialGroup
 
 
 def _camera(cam_id: int, center_x: float) -> Camera:

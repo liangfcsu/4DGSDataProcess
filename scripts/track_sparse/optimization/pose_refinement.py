@@ -9,9 +9,9 @@ from collections.abc import Mapping
 import cv2
 import numpy as np
 
-from .geometry import project, reprojection_errors, triangulation_angle_deg
-from .schema import Camera, MotionClass, Track
-from .uncertainty import camera_at, projection_jacobian
+from track_sparse.geometry.geometry import project, reprojection_errors, triangulation_angle_deg
+from track_sparse.core.schema import Camera, MotionClass, Track
+from track_sparse.geometry.uncertainty import camera_at, projection_jacobian
 
 
 def _camera_with_pose(camera: Camera, R_w2c: np.ndarray, t_w2c: np.ndarray) -> Camera:

@@ -7,8 +7,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .dataset import DatasetIndex
-from .schema import SpatialGroup, Track
+from track_sparse.input.dataset import DatasetIndex
+from track_sparse.core.schema import SpatialGroup, Track
 
 
 def assign_group_colors(groups_by_frame: dict[int, list[SpatialGroup]], dataset: DatasetIndex) -> None:

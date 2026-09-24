@@ -68,19 +68,23 @@ def _bootstrap_runtime() -> None:
     )
 
 
-_bootstrap_runtime()
+if __name__ == "__main__":
+    _bootstrap_runtime()
 
 import argparse  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
+import yaml  # noqa: E402
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parents[1]
+DEFAULT_CONFIG_PATH = SCRIPT_DIR / "configs" / "default.yaml"
 if str(SCRIPT_DIR.parent) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR.parent))
 
-from track_sparse.config import apply_overrides, load_config  # noqa: E402
-from track_sparse.pipeline import PipelineOptions, STAGES, run_pipeline  # noqa: E402
-from track_sparse.preprocess import PreprocessOptions, PreparedInput, prepare_input  # noqa: E402
+from track_sparse.core.config import apply_overrides, load_config  # noqa: E402
+from track_sparse.core.pipeline import PipelineOptions, STAGES, run_pipeline  # noqa: E402
+from track_sparse.input.preprocess import PreprocessOptions, PreparedInput, prepare_input  # noqa: E402
 
 
 def _csv_ints(value: str | None) -> list[int]:
@@ -107,12 +111,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--images-dir", help="高级兼容入口：直接指定去畸变图像根目录")
     parser.add_argument("--sparse-dir", help="高级兼容入口：直接指定固定 COLMAP sparse/0")
     parser.add_argument("--persparse-dir", help="可逐帧 frameXXX_points3D.txt 根目录")
-    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--output", type=Path)
     parser.add_argument(
         "--preprocess-dir", type=Path,
         help="抽帧/标定/去畸变缓存目录（默认 <output>/preprocess）",
     )
-    parser.add_argument("--config", help="覆盖默认 YAML 配置")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="处理参数 YAML（默认 configs/default.yaml）")
     parser.add_argument("--python", help="具备 torch/OpenCV/HDF5 的 Python 解释器")
     parser.add_argument("--gpu", default="0", help="GPU 编号，或 cpu")
     parser.add_argument(
@@ -169,8 +173,76 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+RUN_PATH_OPTIONS = {
+    "input", "images_dir", "sparse_dir", "persparse_dir", "output",
+    "preprocess_dir", "rig_json", "calib_json",
+}
+RUN_LIST_OPTIONS = {"cameras", "stages", "debug_frames"}
+RUN_BOOL_OPTIONS = {"resume", "overwrite", "preprocess_only", "dry_run"}
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Read execution settings from YAML, then apply explicit CLI overrides."""
+    parser = build_parser()
+    cli = list(sys.argv[1:] if argv is None else argv)
+    preliminary, _ = parser.parse_known_args(cli)
+    config_path = preliminary.config.expanduser()
+    if not config_path.is_absolute():
+        config_path = PROJECT_ROOT / config_path
+    config_path = config_path.resolve()
+    try:
+        with config_path.open("r", encoding="utf-8") as handle:
+            payload = yaml.safe_load(handle) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        parser.error(f"无法读取配置文件 {config_path}: {exc}")
+    if not isinstance(payload, dict) or not isinstance(payload.get("run"), dict):
+        parser.error("配置文件必须包含 run: 执行参数")
+    run = payload["run"]
+    actions = {action.dest: action for action in parser._actions}
+    allowed = set(actions) - {"help", "config", "python"}
+    unknown = sorted(set(run) - allowed)
+    if unknown:
+        parser.error("run 中存在未知参数: " + ", ".join(unknown))
+    defaults = {}
+    for key, value in run.items():
+        if value is None:
+            continue
+        if key in RUN_BOOL_OPTIONS and not isinstance(value, bool):
+            parser.error(f"run.{key} 必须是 true 或 false")
+        if key in RUN_PATH_OPTIONS:
+            path = Path(str(value)).expanduser()
+            value = (path if path.is_absolute() else PROJECT_ROOT / path).resolve()
+        elif key in RUN_LIST_OPTIONS:
+            if isinstance(value, list):
+                value = ",".join(str(item) for item in value)
+            elif not isinstance(value, str):
+                parser.error(f"run.{key} 必须是列表或逗号分隔字符串")
+        elif key == "gpu":
+            value = str(value)
+        elif actions[key].type is not None:
+            try:
+                value = actions[key].type(value)
+            except (TypeError, ValueError) as exc:
+                parser.error(f"run.{key} 的值无效: {exc}")
+        if actions[key].choices is not None and value not in actions[key].choices:
+            parser.error(f"run.{key} 必须是 {', '.join(map(str, actions[key].choices))} 之一")
+        defaults[key] = value
+    if "--overwrite" in cli and "--resume" not in cli:
+        defaults["resume"] = False
+    if "--resume" in cli and "--overwrite" not in cli:
+        defaults["overwrite"] = False
+    parser.set_defaults(**defaults)
+    args = parser.parse_args(cli)
+    args.config = config_path
+    if args.output is None:
+        parser.error("run.output 或 --output 不能为空")
+    if args.resume and args.overwrite:
+        parser.error("run.resume 与 run.overwrite 不能同时为 true")
+    return args
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    args = parse_args(argv)
     if not args.input and not (args.images_dir and args.sparse_dir):
         raise SystemExit("必须提供 --input/--dataset，或同时提供 --images-dir 与 --sparse-dir")
     if bool(args.images_dir) != bool(args.sparse_dir):

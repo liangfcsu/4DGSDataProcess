@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv"}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
-GS_PIPELINE_ROOT = Path(__file__).resolve().parents[1] / "gs_pipeline"
+GS_PIPELINE_ROOT = Path(__file__).resolve().parents[2] / "gs_pipeline"
 GS_PIPELINE_PACKAGE = "_track_sparse_gs_pipeline"
 CONVERT_CALIB = GS_PIPELINE_ROOT / "stages" / "convert_calib_to_cameras_json.py"
 
@@ -358,7 +358,7 @@ def prepare_input(options: PreprocessOptions) -> PreparedInput:
                     f"去畸变帧数变化: {frame_count} != {expected.get('frame_count')}"
                 )
         except (FileNotFoundError, ValueError, RuntimeError) as exc:
-            print(f"  ⚠️ 预处理缓存不完整，将从已有抽帧继续修复: {exc}")
+            print(f"  警告: 预处理缓存不完整，将从已有抽帧继续修复: {exc}")
             old_manifest["status"] = "running"
         else:
             return PreparedInput(

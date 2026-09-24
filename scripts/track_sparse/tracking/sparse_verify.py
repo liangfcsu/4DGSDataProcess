@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .io_colmap import read_points3d_text
+from track_sparse.input.io_colmap import read_points3d_text
 
 try:
     from scipy.spatial import cKDTree

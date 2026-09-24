@@ -1,3 +1,24 @@
+# Run from the repository root with: python scripts/track_sparse/run.py
+# For another dataset, edit run.input and run.output first. Other run settings
+# and all tracking parameters below can be adjusted in this same file.
+run:
+  input: data/coffee_martini/coffee_martini
+  input_type: videos
+  output: outputs/coffee_martini_tracks
+  start_frame: 1
+  end_frame: 300
+  max_frames: 300
+  cameras: null
+  gpu: 0
+  undistort_workers: 8
+  stages: all
+  debug_frames: [1, 50, 100, 150, 200, 250, 300]
+  resume: true
+  overwrite: false
+  preprocess_only: false
+  dry_run: false
+  log_level: INFO
+
 schema_version: "2.0.0"
 
 data:
@@ -67,7 +88,7 @@ performance:
   cache_spatial_groups: true
 
 sparse_verify:
-  enabled: true
+  enabled: false
   nn_scale: 3.0
   confidence_weight: 0.15
 

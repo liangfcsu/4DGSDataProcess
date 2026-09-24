@@ -12,23 +12,23 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import SCHEMA_VERSION
-from .camera_graph import build_camera_graph, load_camera_graph, save_camera_graph
-from .dataset import DatasetIndex, discover_dataset, validate_dataset
-from .export import (
+from track_sparse.geometry.camera_graph import build_camera_graph, load_camera_graph, save_camera_graph
+from track_sparse.input.dataset import DatasetIndex, discover_dataset, validate_dataset
+from track_sparse.exports.export import (
     calculate_metrics,
     write_frame_exports,
     write_freetimegs_export,
     write_summaries,
     write_tracks_h5,
 )
-from .io_colmap import load_rig, read_points3d_text
-from .lifecycle import TrackManager
-from .spatial_matcher import HlocFeatureMatcher
-from .sparse_verify import SparseCloudVerifier, discover_per_frame_clouds
-from .temporal_tracker import TemporalTracker
-from .track_graph import build_spatial_groups, filter_spatial_matches
-from .trajectory_optimizer import optimize_trajectories, write_optimization_diagnostics
-from .visualize import assign_group_colors, write_track_overlays, write_trajectory_ply
+from track_sparse.input.io_colmap import load_rig, read_points3d_text
+from track_sparse.tracking.lifecycle import TrackManager
+from track_sparse.matching.spatial_matcher import HlocFeatureMatcher
+from track_sparse.tracking.sparse_verify import SparseCloudVerifier, discover_per_frame_clouds
+from track_sparse.matching.temporal_tracker import TemporalTracker
+from track_sparse.matching.track_graph import build_spatial_groups, filter_spatial_matches
+from track_sparse.optimization.trajectory_optimizer import optimize_trajectories, write_optimization_diagnostics
+from track_sparse.exports.visualize import assign_group_colors, write_track_overlays, write_trajectory_ply
 
 
 LOGGER = logging.getLogger("track_sparse")

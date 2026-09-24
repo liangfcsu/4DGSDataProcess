@@ -10,8 +10,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .geometry import robust_triangulate, triangulation_angle_deg
-from .schema import Camera, TriangulationResult
+from track_sparse.geometry.geometry import robust_triangulate, triangulation_angle_deg
+from track_sparse.core.schema import Camera, TriangulationResult
 
 
 @dataclass(slots=True)

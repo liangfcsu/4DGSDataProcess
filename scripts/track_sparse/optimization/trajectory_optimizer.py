@@ -7,12 +7,12 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
-from .identity_validation import SwitchEvent, split_identity_jumps
-from .motion_groups import group_dynamic_tracks
-from .motion_models import fit_motion_models
-from .pose_refinement import refine_camera_poses, refine_track_measurements
-from .schema import Camera, Track
-from .uncertainty import annotate_track_uncertainty
+from track_sparse.tracking.identity_validation import SwitchEvent, split_identity_jumps
+from track_sparse.optimization.motion_groups import group_dynamic_tracks
+from track_sparse.optimization.motion_models import fit_motion_models
+from track_sparse.optimization.pose_refinement import refine_camera_poses, refine_track_measurements
+from track_sparse.core.schema import Camera, Track
+from track_sparse.geometry.uncertainty import annotate_track_uncertainty
 
 
 @dataclass(slots=True)

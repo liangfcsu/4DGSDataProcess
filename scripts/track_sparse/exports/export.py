@@ -10,8 +10,8 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from . import SCHEMA_VERSION
-from .schema import Camera, MotionClass, Track
+from track_sparse.core import SCHEMA_VERSION
+from track_sparse.core.schema import Camera, MotionClass, Track
 
 
 def _string_array(values: list[str]) -> np.ndarray:

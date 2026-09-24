@@ -4,18 +4,18 @@ import unittest
 
 import numpy as np
 
-from track_sparse.config import apply_overrides, load_config
-from track_sparse.geometry import project
-from track_sparse.identity_validation import split_identity_jumps
-from track_sparse.motion_groups import group_dynamic_tracks
-from track_sparse.motion_models import fit_motion_models
-from track_sparse.observation_graph import ObservationGraphAssociator
-from track_sparse.pose_refinement import refine_camera_poses
-from track_sparse.schema import Camera, MotionClass, Observation, Track, TrackSample, TrackState
-from track_sparse.triangulation_batch import (
+from track_sparse.core.config import apply_overrides, load_config
+from track_sparse.geometry.geometry import project
+from track_sparse.tracking.identity_validation import split_identity_jumps
+from track_sparse.optimization.motion_groups import group_dynamic_tracks
+from track_sparse.optimization.motion_models import fit_motion_models
+from track_sparse.matching.observation_graph import ObservationGraphAssociator
+from track_sparse.optimization.pose_refinement import refine_camera_poses
+from track_sparse.core.schema import Camera, MotionClass, Observation, Track, TrackSample, TrackState
+from track_sparse.geometry.triangulation_batch import (
     TriangulationInput, cuda_is_available, triangulate_cuda_batch,
 )
-from track_sparse.uncertainty import estimate_point_covariance
+from track_sparse.geometry.uncertainty import estimate_point_covariance
 
 
 def _camera(cam_id: int, center: np.ndarray) -> Camera:

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .schema import Observation, Track, TrackState
+from track_sparse.core.schema import Observation, Track, TrackState
 
 try:
     from scipy.optimize import Bounds, LinearConstraint, milp

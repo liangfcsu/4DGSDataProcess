@@ -8,9 +8,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from .geometry import fundamental_matrix, robust_triangulate, sampson_errors
-from .schema import Camera, FeatureObservation, PairMatches, SpatialGroup
-from .triangulation_batch import TriangulationInput, cuda_is_available, triangulate_cuda_batch
+from track_sparse.geometry.geometry import fundamental_matrix, robust_triangulate, sampson_errors
+from track_sparse.core.schema import Camera, FeatureObservation, PairMatches, SpatialGroup
+from track_sparse.geometry.triangulation_batch import TriangulationInput, cuda_is_available, triangulate_cuda_batch
 
 
 Node = tuple[int, int]  # (cam_id, feature_id)

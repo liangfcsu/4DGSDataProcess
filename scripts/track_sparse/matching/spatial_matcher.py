@@ -9,11 +9,11 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from .schema import PairMatches
+from track_sparse.core.schema import PairMatches
 
 
 def vendored_hloc_root() -> Path:
-    return Path(__file__).resolve().parents[1] / "gs_pipeline" / "engine" / "Hierarchical-Localization"
+    return Path(__file__).resolve().parents[2] / "gs_pipeline" / "engine" / "Hierarchical-Localization"
 
 
 def _ensure_hloc_importable() -> None:

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from .schema import Camera, ImageRecord
+from track_sparse.core.schema import Camera, ImageRecord
 
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}

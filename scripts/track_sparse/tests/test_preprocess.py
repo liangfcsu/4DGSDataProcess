@@ -10,7 +10,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from track_sparse.preprocess import PreprocessOptions, detect_input_type, prepare_input
+from track_sparse.input.preprocess import PreprocessOptions, detect_input_type, prepare_input
 
 
 class PreprocessTests(unittest.TestCase):

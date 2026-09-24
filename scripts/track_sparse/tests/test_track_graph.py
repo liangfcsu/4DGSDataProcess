@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from track_sparse.track_graph import ConstrainedComponents
+from track_sparse.matching.track_graph import ConstrainedComponents
 
 
 class TrackGraphTests(unittest.TestCase):
